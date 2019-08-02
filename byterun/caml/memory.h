@@ -285,7 +285,8 @@ struct caml__roots_block {
 */
 
 #define CAMLparam0() \
-  struct caml__roots_block *caml__frame = CAML_LOCAL_ROOTS
+  struct caml__roots_block *caml__frame = CAML_LOCAL_ROOTS;\
+  caml_domain_state* caml_cached_state = Caml_state;
 
 #define CAMLparam1(x) \
   CAMLparam0 (); \
@@ -442,7 +443,7 @@ struct caml__roots_block {
 
 #define CAMLdrop do{              \
   CAMLcheck_mutexes;              \
-  CAML_LOCAL_ROOTS = caml__frame; \
+  caml_cached_state->local_roots = caml__frame; \
 }while (0)
 
 #define CAMLreturn0 do{ \
