@@ -180,9 +180,7 @@ CAMLexport uint32_t caml_hash_mix_string(uint32_t h, value s)
 /* Maximal number of Forward_tag links followed in one step */
 #define MAX_FORWARD_DEREFERENCE 1000
 
-/* The generic hash function */
-
-CAMLprim value caml_hash(value count, value limit, value seed, value obj)
+CAMLprim value caml_hash_fields(value count, value limit, value seed, value obj)
 {
   CAMLparam4(count, limit, seed, obj);
   
@@ -303,6 +301,88 @@ CAMLprim value caml_hash(value count, value limit, value seed, value obj)
   /* Fold result to the range [0, 2^30-1] so that it is a nonnegative
      OCaml integer both on 32 and 64-bit platforms. */
   CAMLreturn (Val_int(h & 0x3FFFFFFFU));
+}
+
+/* The generic hash function */
+
+CAMLprim value caml_hash(value count, value limit, value seed, value obj)
+{ 
+  uint32_t h;                   /* Rolling hash */
+  mlsize_t i, len;
+
+  h = Int_val(seed);
+
+  again:
+  if (Is_long(obj)) {
+    h = caml_hash_mix_intnat(h, obj);
+  } else {
+    switch (Tag_val(obj)) {
+    case String_tag:
+      h = caml_hash_mix_string(h, obj);
+      break;
+    case Double_tag:
+      h = caml_hash_mix_double(h, Double_val(obj));
+      break;
+    case Double_array_tag:
+      for (i = 0, len = Wosize_val(obj) / Double_wosize; i < len, i < Long_val(limit); i++) {
+        h = caml_hash_mix_double(h, Double_flat_field(obj, i));
+      }
+      break;
+    case Abstract_tag:
+      /* Block contents unknown.  Do nothing. */
+      break;
+    case Infix_tag:
+      /* Mix in the offset to distinguish different functions from
+          the same mutually-recursive definition */
+      h = caml_hash_mix_uint32(h, Infix_offset_val(obj));
+      obj = obj - Infix_offset_val(obj);
+      goto again;
+    case Closure_tag:
+      /* !! something complicated */
+      #if 0
+      /* v is a pointer outside the heap, probably a code pointer.
+          Shall we count it?  Let's say yes by compatibility with old code. */
+      h = caml_hash_mix_intnat(h, v);
+      num--;
+      #endif
+      h = 42;
+      break;
+    case Cont_tag:
+      /* All continuations hash to the same value, since we have no idea how to distinguish them. */
+      h = 42;
+      break;
+    case Forward_tag:
+      /* PR#6361: we can have a loop here, so limit the number of
+          Forward_tag links being followed */
+      for (i = MAX_FORWARD_DEREFERENCE; i > 0; i--) {
+        obj = Forward_val(obj);
+        if (Is_long(obj) || Tag_val(obj) != Forward_tag)
+          goto again;
+      }
+      /* Give up on this object and move to the next */
+      break;
+    case Object_tag:
+      h = caml_hash_mix_intnat(h, Oid_val(obj));
+      break;
+    case Custom_tag:
+      /* If no hashing function provided, do nothing. */
+      /* Only use low 32 bits of custom hash, for 32/64 compatibility */
+      if (Custom_ops_val(obj)->hash != NULL) {
+        uint32_t n = (uint32_t) Custom_ops_val(obj)->hash(obj);
+        h = caml_hash_mix_uint32(h, n);
+      }
+      break;
+    default:
+      h = caml_hash_fields(count, limit, seed, obj);
+      break;
+    }
+  }
+
+  /* Final mixing of bits */
+  FINAL_MIX(h);
+  /* Fold result to the range [0, 2^30-1] so that it is a nonnegative
+     OCaml integer both on 32 and 64-bit platforms. */
+  return Val_int(h & 0x3FFFFFFFU);
 }
 
 CAMLprim value caml_hash_univ_param(value count, value limit, value obj)
