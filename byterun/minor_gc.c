@@ -199,47 +199,53 @@ static void oldify_one (void* st_v, value v, value *p)
   }
 
   if (tag == Cont_tag) {
-    struct stack_info* stk = Ptr_val(Op_val(v)[0]);
     CAMLassert(Wosize_hd(hd) == 1 && infix_offset == 0);
-    result = alloc_shared(1, Cont_tag);
-    *p = result;
-    Op_val(result)[0] = Val_ptr(stk);
-    *Hp_val (v) = 0;
-    Op_val(v)[0] = result;
-    if (stk != NULL)
-      caml_scan_stack(&oldify_one, st, stk);
+    if( atomic_compare_exchange_strong(Hp_val(v),&hd, 0) )
+    {
+      struct stack_info* stk = Ptr_val(Op_val(v)[0]);
+      result = alloc_shared(1, Cont_tag);
+      *p = result;
+      Op_val(result)[0] = Val_ptr(stk);
+      Op_val(v)[0] = result;
+      if (stk != NULL)
+        caml_scan_stack(&oldify_one, st, stk);
+    }
   } else if (tag < Infix_tag) {
-    value field0;
-    sz = Wosize_hd (hd);
-    st->live_bytes += Bhsize_hd(hd);
-    result = alloc_shared (sz, tag);
-    *p = result + infix_offset;
-    field0 = Op_val(v)[0];
-    CAMLassert (!Is_debug_tag(field0));
-    *Hp_val (v) = 0;           /* Set forward flag */
-    Op_val(v)[0] = result;     /*  and forward pointer. */
-    if (sz > 1){
-      Op_val (result)[0] = field0;
-      Op_val (result)[1] = st->todo_list;    /* Add this block */
-      st->todo_list = v;                     /*  to the "to do" list. */
-    }else{
-      CAMLassert (sz == 1);
-      p = Op_val(result);
-      v = field0;
-      goto tail_call;
+    if( atomic_compare_exchange_strong(Hp_val(v),&hd, 0) )
+    {
+      value field0;
+      sz = Wosize_hd (hd);
+      st->live_bytes += Bhsize_hd(hd);
+      result = alloc_shared (sz, tag);
+      *p = result + infix_offset;
+      field0 = Op_val(v)[0];
+      CAMLassert (!Is_debug_tag(field0));
+      Op_val(v)[0] = result;     /*  and forward pointer. */
+      if (sz > 1){
+        Op_val (result)[0] = field0;
+        Op_val (result)[1] = st->todo_list;    /* Add this block */
+        st->todo_list = v;                     /*  to the "to do" list. */
+      }else{
+        CAMLassert (sz == 1);
+        p = Op_val(result);
+        v = field0;
+        goto tail_call;
+      }
     }
   } else if (tag >= No_scan_tag) {
     sz = Wosize_hd (hd);
-    st->live_bytes += Bhsize_hd(hd);
-    result = alloc_shared(sz, tag);
-    for (i = 0; i < sz; i++) {
-      value curr = Op_val(v)[i];
-      Op_val (result)[i] = curr;
+    if( atomic_compare_exchange_strong(Hp_val(v),&hd, 0) )
+    {
+      st->live_bytes += Bhsize_hd(hd);
+      result = alloc_shared(sz, tag);
+      for (i = 0; i < sz; i++) {
+        value curr = Op_val(v)[i];
+        Op_val (result)[i] = curr;
+      }
+      Op_val (v)[0] = result;    /*  and forward pointer. */
+      CAMLassert (infix_offset == 0);
+      *p = result;
     }
-    *Hp_val (v) = 0;           /* Set forward flag */
-    Op_val (v)[0] = result;    /*  and forward pointer. */
-    CAMLassert (infix_offset == 0);
-    *p = result;
   } else {
     CAMLassert (tag == Forward_tag);
     CAMLassert (infix_offset == 0);
@@ -254,14 +260,16 @@ static void oldify_one (void* st_v, value v, value *p)
     if (ft == Forward_tag || ft == Lazy_tag || ft == Double_tag) {
       /* Do not short-circuit the pointer.  Copy as a normal block. */
       CAMLassert (Wosize_hd (hd) == 1);
-      st->live_bytes += Bhsize_hd(hd);
-      result = alloc_shared (1, Forward_tag);
-      *p = result;
-      *Hp_val (v) = 0;             /* Set (GC) forward flag */
-      Op_val (v)[0] = result;      /*  and forward pointer. */
-      p = Op_val (result);
-      v = f;
-      goto tail_call;
+      if( atomic_compare_exchange_strong(Hp_val(v),&hd, 0) )
+      {
+        st->live_bytes += Bhsize_hd(hd);
+        result = alloc_shared (1, Forward_tag);
+        *p = result;
+        Op_val (v)[0] = result;      /*  and forward pointer. */
+        p = Op_val (result);
+        v = f;
+        goto tail_call;
+      }
     } else {
       v = f;                        /* Follow the forwarding */
       goto tail_call;               /*  then oldify. */
