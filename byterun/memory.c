@@ -236,8 +236,6 @@ CAMLprim value caml_atomic_load (value ref)
     /* See Note [MM] above */
     atomic_thread_fence(memory_order_acquire);
     v = atomic_load(Op_atomic_val(ref));
-    if (Is_foreign(v))
-      v = caml_read_barrier(ref, 0);
     return v;
   }
 }
