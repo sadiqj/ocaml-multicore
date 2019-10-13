@@ -663,28 +663,7 @@ let emit_instr fallthrough i =
       if Config.stats then begin
         I.inc (domain_field Domainstate.Domain_mutable_loads);
       end;
-      I.mov (mem64 QWORD 0 ~base:(arg64 i 0) (arg64 i 1) ~scale:8) (reg i.res.(0));
-      I.mov (res i 0) rax;
-      I.xor r15 rax;
-      let s = Nativeint.(shift_left one Domainstate.minor_heap_align_bits) in
-      I.sub (nat s) rax;
-      let bits = Domainstate.minor_heap_align_bits + Domainstate.minor_heap_sel_bits in
-      let minor_val_bitmask = Nativeint.(logor one (shift_left minus_one bits)) in
-      (* The test instruction sign-extends a 32-bit immediate *)
-      assert (minor_val_bitmask = Nativeint.(minor_val_bitmask |> to_int32 |> of_int32));
-      I.test (nat minor_val_bitmask) rax;
-      let lbl_call_read_barrier = new_label () in
-      let lbl_return = new_label () in
-      let lbl_frame = record_frame_label i.live false Debuginfo.none in
-      I.je (label lbl_call_read_barrier);
-      def_label lbl_return;
-      read_barrier_call_sites :=
-        { rb_base = i.arg.(0);
-          rb_off = i.arg.(1);
-          rb_dest = i.res.(0);
-          rb_lbl = lbl_call_read_barrier;
-          rb_return_lbl = lbl_return;
-          rb_frame = lbl_frame } :: !read_barrier_call_sites
+      I.mov (mem64 QWORD 0 ~base:(arg64 i 0) (arg64 i 1) ~scale:8) (reg i.res.(0))
   | Lop(Istore(chunk, addr, is_assignment)) ->
       if Config.stats && is_assignment then begin
         I.inc (domain_field Domainstate.Domain_immutable_stores);

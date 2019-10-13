@@ -123,14 +123,7 @@ sp is a local copy of the global variable caml_extern_sp. */
 #define Accu_field(i) do {                    \
     int idx = (i);                            \
     value field_contents = Op_val(accu)[idx]; \
-    if (Is_foreign(field_contents)) {         \
-      Setup_for_gc;                           \
-      value r = caml_read_barrier(accu, idx); \
-      Restore_after_gc;                       \
-      accu = r;                               \
-    } else {                                  \
-      accu = field_contents;                  \
-    }                                         \
+    accu = field_contents;                  \
   } while (0)
 
 /* Register optimization.
