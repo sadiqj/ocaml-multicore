@@ -134,6 +134,11 @@ static value alloc_shared(mlsize_t wosize, tag_t tag)
   return Val_hp(mem);
 }
 
+static inline int is_in_interval (value v, char* low_closed, char* high_open)
+{
+  return low_closed <= (char*)v && (char*)v < high_open;
+}
+
 /* If [*v] is an [Infix_tag] object, [v] is updated to point to the first
  * object in the block. */
 static inline void resolve_infix_val (value* v)
@@ -158,12 +163,14 @@ static void oldify_one (void* st_v, value v, value *p)
   tag_t tag;
   caml_domain_state* domain_state =
     st->promote_domain ? st->promote_domain->state : Caml_state;
+  char* young_ptr = domain_state->young_ptr;
+  char* young_end = domain_state->young_end;
   CAMLassert (domain_state->young_start <= domain_state->young_ptr &&
           domain_state->young_ptr <= domain_state->young_end);
 
  tail_call:
-  /* want to follow links in all minor heaps */
-  if (!Is_minor(v)) {
+  /* TODO: want to follow links in all minor heaps */
+  if (!(Is_block(v) && Is_minor(v))) {
     /* not a minor block */
     *p = v;
     return;
@@ -268,7 +275,7 @@ static inline int ephe_check_alive_data (struct caml_ephe_ref_elt *re,
   for (i = CAML_EPHE_FIRST_KEY; i < Wosize_val(re->ephe); i++) {
     child = Op_val(re->ephe)[i];
     if (child != caml_ephe_none
-        && Is_block (child) && Is_minor(child)) {
+        && Is_block (child) && is_in_interval(child, young_ptr, young_end)) {
       resolve_infix_val(&child);
       if (Hd_val(child) != 0) {
         /* value not copied to major heap */
@@ -303,13 +310,15 @@ static void oldify_mopup (struct oldify_state* st)
 
     f = Op_val (new_v)[0];
     CAMLassert (!Is_debug_tag(f));
-    if (Is_block (f) && Is_minor(f)) {
+    if (Is_block (f) &&
+        is_in_interval((value)Hp_val(v), young_ptr, young_end)) {
       oldify_one (st, f, Op_val (new_v));
     }
     for (i = 1; i < Wosize_val (new_v); i++){
       f = Op_val (v)[i];
       CAMLassert (!Is_debug_tag(f));
-      if (Is_block (f) && Is_minor(f)) {
+      if (Is_block (f) &&
+          is_in_interval((value)Hp_val(v), young_ptr, young_end)) {
         oldify_one (st, f, Op_val (new_v) + i);
       } else {
         Op_val (new_v)[i] = f;
@@ -325,7 +334,8 @@ static void oldify_mopup (struct oldify_state* st)
     /* look only at ephemeron with data in the minor heap */
     if (re->offset == CAML_EPHE_DATA_OFFSET) {
       value *data = &Ephe_data(re->ephe);
-      if (*data != caml_ephe_none && Is_block(*data) && Is_minor(*data)) {
+      if (*data != caml_ephe_none && Is_block(*data) &&
+          is_in_interval(*data, young_ptr, young_end)) {
         resolve_infix_val(data);
         if (Hd_val(*data) == 0) { /* Value copied to major heap */
           *data = Op_val(*data)[0];
@@ -348,8 +358,13 @@ void forward_pointer (void* state, value v, value *p) {
   header_t hd;
   mlsize_t offset;
   value fwd;
+  struct domain* promote_domain = state;
+  caml_domain_state* domain_state =
+    promote_domain ? promote_domain->state : Caml_state;
+  char* young_ptr = domain_state->young_ptr;
+  char* young_end = domain_state->young_end;
 
-  if (Is_block (v) && Is_minor(v)) {
+  if (Is_block (v) && is_in_interval((value)Hp_val(v), young_ptr, young_end)) {
     hd = Hd_val(v);
     if (hd == 0) {
       *p = Op_val(v)[0];
@@ -388,6 +403,37 @@ CAMLexport value caml_promote(struct domain* domain, value root)
 {
   /* ctk21: neuter caml_promote as part of experiment */
   return root;
+
+#if 0
+  caml_domain_state* domain_state = domain->state;
+  uintnat prev_alloc_words = domain_state->allocated_words;
+  struct oldify_state st = {0};
+
+  /* Integers are already shared */
+  if (Is_long(root))
+    return root;
+
+  /* Objects which are in the major heap are already shared. */
+  if (!Is_minor(root))
+    return root;
+
+  st.promote_domain = domain;
+
+  CAMLassert(caml_owner_of_young_block(root) == domain);
+  oldify_one (&st, root, &root);
+  oldify_mopup (&st);
+
+  CAMLassert (!Is_minor(root));
+  /* FIXME: surely a newly-allocated root is already darkened? */
+  caml_darken(0, root, 0);
+
+  /* ctk21: inefficient, but part of refactor to remove caml_promote */
+  caml_gc_log("caml_promote: forcing minor GC. ");
+  caml_empty_minor_heap_domain (domain, (void*)0);
+
+  domain_state->stat_promoted_words += domain_state->allocated_words - prev_alloc_words;
+  return root;
+#endif
 }
 
 //*****************************************************************************
@@ -457,8 +503,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   if (minor_allocated_bytes != 0) {
     uintnat prev_alloc_words = domain_state->allocated_words;
 
-#if 0
-/*#ifdef DEBUG*/
+#ifdef DEBUG
     /*
       TODO: when we allow across young-young pointers I don't think this is true any more
     */
@@ -528,7 +573,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
         continue;
       }
       value* key = &Op_val(re->ephe)[re->offset];
-      if (*key != caml_ephe_none && Is_block(*key) && Is_minor(*key)) {
+      if (*key != caml_ephe_none && Is_block(*key) &&
+          is_in_interval(*key, young_ptr, young_end)) {
         resolve_infix_val(key);
         if (Hd_val(*key) == 0) { /* value copied to major heap */
           *key = Op_val(*key)[0];
@@ -643,10 +689,14 @@ int caml_try_stw_empty_minor_heap_on_all_domains ()
 }
 
 /* must be called outside a STW section, will retry until we have emptied our minor heap */
-void caml_empty_minor_heaps_once ()
+void caml_empty_my_minor_heap ()
 {
-  while( !caml_try_stw_empty_minor_heap_on_all_domains() )
-    ;
+  caml_domain_state* domain_state = Caml_state;
+
+  caml_try_stw_empty_minor_heap_on_all_domains();
+
+  if (domain_state->young_end - domain_state->young_ptr > 0)
+    caml_empty_my_minor_heap();
 }
 
 /* Do a minor collection and a slice of major collection, call finalisation
