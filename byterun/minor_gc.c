@@ -311,14 +311,14 @@ static void oldify_mopup (struct oldify_state* st)
     f = Op_val (new_v)[0];
     CAMLassert (!Is_debug_tag(f));
     if (Is_block (f) &&
-        is_in_interval((value)Hp_val(v), young_ptr, young_end)) {
+        Is_minor(f)) {
       oldify_one (st, f, Op_val (new_v));
     }
     for (i = 1; i < Wosize_val (new_v); i++){
       f = Op_val (v)[i];
       CAMLassert (!Is_debug_tag(f));
       if (Is_block (f) &&
-          is_in_interval((value)Hp_val(v), young_ptr, young_end)) {
+          Is_minor(f)) {
         oldify_one (st, f, Op_val (new_v) + i);
       } else {
         Op_val (new_v)[i] = f;
@@ -335,7 +335,7 @@ static void oldify_mopup (struct oldify_state* st)
     if (re->offset == CAML_EPHE_DATA_OFFSET) {
       value *data = &Ephe_data(re->ephe);
       if (*data != caml_ephe_none && Is_block(*data) &&
-          is_in_interval(*data, young_ptr, young_end)) {
+          Is_minor(*data)) {
         resolve_infix_val(data);
         if (Hd_val(*data) == 0) { /* Value copied to major heap */
           *data = Op_val(*data)[0];
@@ -364,7 +364,7 @@ void forward_pointer (void* state, value v, value *p) {
   char* young_ptr = domain_state->young_ptr;
   char* young_end = domain_state->young_end;
 
-  if (Is_block (v) && is_in_interval((value)Hp_val(v), young_ptr, young_end)) {
+  if (Is_block (v) && Is_minor(v)) {
     hd = Hd_val(v);
     if (hd == 0) {
       *p = Op_val(v)[0];
@@ -574,7 +574,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
       }
       value* key = &Op_val(re->ephe)[re->offset];
       if (*key != caml_ephe_none && Is_block(*key) &&
-          is_in_interval(*key, young_ptr, young_end)) {
+          Is_minor(*key)) {
         resolve_infix_val(key);
         if (Hd_val(*key) == 0) { /* value copied to major heap */
           *key = Op_val(*key)[0];
