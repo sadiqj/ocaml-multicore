@@ -132,21 +132,24 @@ static void write_barrier(value obj, int field, value old_val, value new_val)
 
   Assert (Is_block(obj));
 
-  if (!Is_young(obj)) {
+  if (!Is_minor(obj)) {
 
     caml_darken(0, old_val, 0);
 
-    if (Is_block(new_val) && Is_young(new_val)) {
+    if (Is_block(new_val) && Is_minor(new_val)) {
 
-      /* If old_val is young, then `Op_val(obj)+field` is already in
-       * major_ref. We can safely skip adding it again. */
-       if (Is_block(old_val) && Is_young(old_val))
+      /* If old_val is in some minor heap, then `Op_val(obj)+field` is
+       * already in some major_ref. We can safely skip adding it again. */
+       if (Is_block(old_val) && Is_minor(old_val))
          return;
 
       /* Add to remembered set */
       Ref_table_add(&domain_state->minor_tables->major_ref, Op_val(obj) + field);
     }
-  } else if (Is_young(new_val) && new_val < obj) {
+  }
+#ifdef DEBUG
+  /* FIXME: this is not right for STW shared minor heaps */
+  else if (Is_young(new_val) && new_val < obj) {
 
     /* Both obj and new_val are young and new_val is more recent than obj.
       * If old_val is also young, and younger than obj, then it must be the
@@ -158,6 +161,7 @@ static void write_barrier(value obj, int field, value old_val, value new_val)
     /* Add to remembered set */
     Ref_table_add(&domain_state->minor_tables->minor_ref, Op_val(obj) + field);
   }
+#endif
 }
 
 CAMLexport void caml_modify_field (value obj, int field, value val)
@@ -185,7 +189,7 @@ CAMLexport void caml_initialize_field (value obj, int field, value val)
   Assert(0 <= field && field < Wosize_val(obj));
 #ifdef DEBUG
   /* caml_initialize_field can only be used on just-allocated objects */
-  if (Is_young(obj))
+  if (Is_minor(obj))
     Assert(Op_val(obj)[field] == Debug_uninit_minor ||
            Op_val(obj)[field] == Val_unit);
   else
@@ -193,18 +197,13 @@ CAMLexport void caml_initialize_field (value obj, int field, value val)
            Op_val(obj)[field] == Val_unit);
 #endif
 
-  if (!Is_young(obj) && Is_young(val)) {
-    Begin_root(obj);
-    val = caml_promote(caml_domain_self(), val);
-    End_roots();
-  }
   write_barrier(obj, field, Op_val(obj)[field], val);
   Op_val(obj)[field] = val;
 }
 
 CAMLexport int caml_atomic_cas_field (value obj, int field, value oldval, value newval)
 {
-  if (Is_young(obj) || caml_domain_alone()) {
+  if (caml_domain_alone()) {
     /* non-atomic CAS since only this thread can access the object */
     value* p = &Op_val(obj)[field];
     if (*p == oldval) {
@@ -229,7 +228,7 @@ CAMLexport int caml_atomic_cas_field (value obj, int field, value oldval, value 
 
 CAMLprim value caml_atomic_load (value ref)
 {
-  if (Is_young(ref) || caml_domain_alone()) {
+  if (caml_domain_alone()) {
     return Op_val(ref)[0];
   } else {
     value v;
@@ -246,7 +245,7 @@ CAMLprim value caml_atomic_load (value ref)
 CAMLprim value caml_atomic_exchange (value ref, value v)
 {
   value ret;
-  if (Is_young(ref) || caml_domain_alone()) {
+  if (caml_domain_alone()) {
     ret = Op_val(ref)[0];
     Op_val(ref)[0] = v;
   } else {
@@ -260,7 +259,7 @@ CAMLprim value caml_atomic_exchange (value ref, value v)
 
 CAMLprim value caml_atomic_cas (value ref, value oldv, value newv)
 {
-  if (Is_young(ref) || caml_domain_alone()) {
+  if (caml_domain_alone()) {
     value* p = Op_val(ref);
     if (*p == oldv) {
       *p = newv;
@@ -283,7 +282,7 @@ CAMLprim value caml_atomic_cas (value ref, value oldv, value newv)
 CAMLprim value caml_atomic_fetch_add (value ref, value incr)
 {
   value ret;
-  if (Is_young(ref) || caml_domain_alone()) {
+  if (caml_domain_alone()) {
     value* p = Op_val(ref);
     CAMLassert(Is_long(*p));
     ret = *p;
@@ -320,33 +319,19 @@ CAMLexport void caml_blit_fields (value src, int srcoff, value dst, int dstoff, 
 
   /* we can't use memcpy/memmove since they may not do atomic word writes.
      for instance, they may copy a byte at a time */
+
+  /* TODO: could add a caml_domain_alone fastpath */
   if (src == dst && srcoff < dstoff) {
     /* copy descending */
-    if (Is_young(dst)) {
-      /* dst is young, we copy fields directly. This cannot create old->young
-         ptrs, nor break incremental GC of the shared heap */
-      for (i = n; i > 0; i--) {
-        Op_val(dst)[dstoff + i - 1] = Op_val(src)[srcoff + i - 1];
-      }
-    } else {
-      for (i = n; i > 0; i--) {
-        caml_read_field(src, srcoff + i - 1, &x);
-        caml_modify_field(dst, dstoff + i - 1, x);
-      }
+    for (i = n; i > 0; i--) {
+      caml_read_field(src, srcoff + i - 1, &x);
+      caml_modify_field(dst, dstoff + i - 1, x);
     }
   } else {
     /* copy ascending */
-    if (Is_young(dst)) {
-      /* see comment above */
-      for (i = 0; i < n; i++) {
-        caml_read_field(src, srcoff + i, &x);
-        Op_val(dst)[dstoff + i] = x;
-      }
-    } else {
-      for (i = 0; i < n; i++) {
-        caml_read_field(src, srcoff + i, &x);
-        caml_modify_field(dst, dstoff + i, x);
-      }
+    for (i = 0; i < n; i++) {
+      caml_read_field(src, srcoff + i, &x);
+      caml_modify_field(dst, dstoff + i, x);
     }
   }
   CAMLreturn0;
@@ -495,10 +480,6 @@ int is_minor(value v) {
 
 int is_foreign(value v) {
   return Is_foreign(v);
-}
-
-int is_young(value v) {
-  return Is_young(v);
 }
 
 int has_status(value v, status s) {

@@ -364,6 +364,7 @@ CAMLprim value caml_continuation_use (value cont)
 {
   struct stack_info* stk;
   CAMLassert(Is_block(cont) && Tag_val(cont) == Cont_tag);
+  /* FIXME: not sure how this will work now minor heaps are shared */
   if (Is_young(cont)) {
     stk = Ptr_val(Op_val(cont)[0]);
     Op_val(cont)[0] = Val_ptr(NULL);

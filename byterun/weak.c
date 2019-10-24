@@ -143,12 +143,13 @@ void caml_ephe_clean (struct domain* d, value v) {
             /* Do not short-circuit the pointer */
           } else {
             Op_val(v)[i] = child = f;
-            if (Is_block (f) && Is_young (f))
+            if (Is_block (f) && Is_minor (f))
               add_to_ephe_ref_table(&Caml_state->minor_tables->ephe_ref, v, i);
             goto ephemeron_again;
           }
         }
       }
+      /* FIXME: not sure how this will work with shared minor heaps */
       if (!Is_young (child) && is_unmarked(child)) {
         release_data = 1;
         Op_val(v)[i] = caml_ephe_none;
@@ -180,9 +181,11 @@ static void do_set (struct domain* d, value e, mlsize_t offset, value v)
   CAMLassert (Ephe_domain(e) == d ||
               !Is_block(v) || !Is_minor(v)); //blit operations
 
+  /* FIXME: not sure how this will work with shared minor heaps */
   if (Is_block(v) && Is_young(v)) {
     value old = Op_val(e)[offset];
     Op_val(e)[offset] = v;
+    /* FIXME: not sure how this will work with shared minor heaps */
     if (!(Is_block(old) && Is_young(old)))
       add_to_ephe_ref_table (&d->state->minor_tables->ephe_ref,
                              e, offset);

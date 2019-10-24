@@ -455,7 +455,7 @@ static struct pool* find_pool_to_rescan();
 static void mark_stack_push(struct mark_stack* stk, mark_entry e)
 {
   value v;
-  CAMLassert(Is_block(e.block) && !Is_young(e.block));
+  CAMLassert(Is_block(e.block) && !Is_minor(e.block));
   CAMLassert(Tag_val(e.block) != Infix_tag);
   CAMLassert(Tag_val(e.block) != Cont_tag);
   CAMLassert(Tag_val(e.block) < No_scan_tag);
@@ -564,7 +564,7 @@ static intnat mark(intnat budget) {
 
 void caml_darken_cont(value cont)
 {
-  CAMLassert(Is_block(cont) && !Is_young(cont) && Tag_val(cont) == Cont_tag);
+  CAMLassert(Is_block(cont) && !Is_minor(cont) && Tag_val(cont) == Cont_tag);
   SPIN_WAIT {
     header_t hd = atomic_load_explicit(Hp_atomic_val(cont), memory_order_relaxed);
     CAMLassert(!Has_status_hd(hd, global.GARBAGE));
