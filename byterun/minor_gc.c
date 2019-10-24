@@ -401,6 +401,10 @@ void caml_empty_minor_heap_domain (struct domain* domain, void* data);
 
 CAMLexport value caml_promote(struct domain* domain, value root)
 {
+  /* ctk21: neuter caml_promote as part of experiment */
+  return root;
+
+#if 0
   caml_domain_state* domain_state = domain->state;
   uintnat prev_alloc_words = domain_state->allocated_words;
   struct oldify_state st = {0};
@@ -429,6 +433,7 @@ CAMLexport value caml_promote(struct domain* domain, value root)
 
   domain_state->stat_promoted_words += domain_state->allocated_words - prev_alloc_words;
   return root;
+#endif
 }
 
 //*****************************************************************************

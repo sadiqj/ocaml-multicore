@@ -455,6 +455,12 @@ static void send_read_fault(struct read_fault_req* req)
 
 CAMLexport value caml_read_barrier(value obj, int field)
 {
+  /* ctk21: neuter the read barrier as part of experiment */
+  CAMLparam1(obj);
+  value orig = Op_val(obj)[field];
+  CAMLreturn (orig);
+
+#if 0
   /* A GC may occur just before or just after sending a fault. The obj value
      must be root. The orig value must *not* be a root, since it may contain a
      foreign value, which the GC must not see even if it runs just before the
@@ -475,6 +481,7 @@ CAMLexport value caml_read_barrier(value obj, int field)
     ret = orig;
   }
   CAMLreturn (ret);
+#endif
 }
 
 #ifdef DEBUG
