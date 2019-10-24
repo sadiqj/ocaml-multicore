@@ -499,6 +499,9 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
     uintnat prev_alloc_words = domain_state->allocated_words;
 
 #ifdef DEBUG
+    /*
+      TODO: when we allow across young-young pointers I don't think this is true any more
+    */
     /* In DEBUG mode, verify that the minor_ref table contains all young-young pointers
        from older to younger objects */
     {
@@ -520,7 +523,13 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
           // FIXME: should scan Cont_tag
           for (i = 0; i < Wosize_hd(hd); i++) {
             value* f = Op_val(curr) + i;
-            if (Is_block(*f) && is_in_interval(*f, young_ptr, young_end) &&
+            /* TODO: is it important that:
+             (*f) lies in a valid region of a minor heap
+              or
+             (*f) lies in any minor heap region (as assumed by Is_minor)
+            */
+            /*if (Is_block(*f) && is_in_interval(*f, young_ptr, young_end) &&*/
+            if (Is_minor(*f) &&
                 *f < curr) {
               CAMLassert(caml_addrmap_contains(&young_young_ptrs, (value)f));
             }
@@ -577,7 +586,13 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
     for (r = minor_tables->major_ref.base;
          r < minor_tables->major_ref.ptr; r++) {
       value v = **r;
-      if (Is_block (v) && is_in_interval ((value)Hp_val(v), young_ptr, young_end)) {
+      /* TODO: is it important that:
+       v lies in a valid region of a minor heap
+        or
+       v lies in any minor heap region (as assumed by Is_minor)
+      */
+      /*if (Is_block (v) && is_in_interval ((value)Hp_val(v), young_ptr, young_end)) {*/
+      if (Is_minor(v)) {
         value vnew;
         header_t hd = Hd_val(v);
         int offset = 0;
