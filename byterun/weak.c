@@ -149,7 +149,8 @@ void caml_ephe_clean (struct domain* d, value v) {
           }
         }
       }
-      /* FIXME: not sure how this will work with shared minor heaps */
+
+      // FIXME: Is_young -> Is_minor here is probably not what we want, fix this.
       if (!Is_young (child) && is_unmarked(child)) {
         release_data = 1;
         Op_val(v)[i] = caml_ephe_none;
@@ -177,15 +178,13 @@ static void clean_field (struct domain* d, value e, mlsize_t offset)
 
 static void do_set (struct domain* d, value e, mlsize_t offset, value v)
 {
-  CAMLassert (!(Is_block(v) && Is_foreign(v)));
+  CAMLassert (!Is_block(v));
   CAMLassert (Ephe_domain(e) == d ||
               !Is_block(v) || !Is_minor(v)); //blit operations
 
-  /* FIXME: not sure how this will work with shared minor heaps */
   if (Is_block(v) && Is_young(v)) {
     value old = Op_val(e)[offset];
     Op_val(e)[offset] = v;
-    /* FIXME: not sure how this will work with shared minor heaps */
     if (!(Is_block(old) && Is_young(old)))
       add_to_ephe_ref_table (&d->state->minor_tables->ephe_ref,
                              e, offset);

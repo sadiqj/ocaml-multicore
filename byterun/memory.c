@@ -133,35 +133,29 @@ static void write_barrier(value obj, int field, value old_val, value new_val)
   Assert (Is_block(obj));
 
   if (!Is_minor(obj)) {
-
     caml_darken(0, old_val, 0);
 
     if (Is_block(new_val) && Is_minor(new_val)) {
 
-      /* If old_val is in some minor heap, then `Op_val(obj)+field` is
-       * already in some major_ref. We can safely skip adding it again. */
+      /* If old_val is young, then `Op_val(obj)+field` is already in
+       * major_ref. We can safely skip adding it again. */
        if (Is_block(old_val) && Is_minor(old_val))
          return;
 
       /* Add to remembered set */
       Ref_table_add(&domain_state->minor_tables->major_ref, Op_val(obj) + field);
     }
-  }
-#ifdef DEBUG
-  /* FIXME: this is not right for STW shared minor heaps */
-  else if (Is_young(new_val) && new_val < obj) {
-
+  } else if (Is_minor(new_val) && new_val < obj) {
     /* Both obj and new_val are young and new_val is more recent than obj.
       * If old_val is also young, and younger than obj, then it must be the
       * case that `Op_val(obj)+field` is already in minor_ref. We can safely
       * skip adding it again. */
-    if (Is_block(old_val) && Is_young(old_val) && old_val < obj)
+    if (Is_block(old_val) && Is_minor(old_val) && old_val < obj)
       return;
 
     /* Add to remembered set */
     Ref_table_add(&domain_state->minor_tables->minor_ref, Op_val(obj) + field);
   }
-#endif
 }
 
 CAMLexport void caml_modify_field (value obj, int field, value val)
@@ -189,7 +183,7 @@ CAMLexport void caml_initialize_field (value obj, int field, value val)
   Assert(0 <= field && field < Wosize_val(obj));
 #ifdef DEBUG
   /* caml_initialize_field can only be used on just-allocated objects */
-  if (Is_minor(obj))
+  if (Is_young(obj))
     Assert(Op_val(obj)[field] == Debug_uninit_minor ||
            Op_val(obj)[field] == Val_unit);
   else
@@ -317,8 +311,6 @@ CAMLexport void caml_blit_fields (value src, int srcoff, value dst, int dstoff, 
 
   /* we can't use memcpy/memmove since they may not do atomic word writes.
      for instance, they may copy a byte at a time */
-
-  /* TODO: could add a caml_domain_alone fastpath */
   if (src == dst && srcoff < dstoff) {
     /* copy descending */
     for (i = n; i > 0; i--) {
@@ -478,6 +470,10 @@ int is_minor(value v) {
 
 int is_foreign(value v) {
   return Is_foreign(v);
+}
+
+int is_young(value v) {
+  return Is_young(v);
 }
 
 int has_status(value v, status s) {
