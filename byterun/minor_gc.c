@@ -163,10 +163,6 @@ static void oldify_one (void* st_v, value v, value *p)
   tag_t tag;
   caml_domain_state* domain_state =
     st->promote_domain ? st->promote_domain->state : Caml_state;
-  char* young_ptr = domain_state->young_ptr;
-  char* young_end = domain_state->young_end;
-  CAMLassert (domain_state->young_start <= domain_state->young_ptr &&
-          domain_state->young_ptr <= domain_state->young_end);
 
  tail_call:
   /* TODO: want to follow links in all minor heaps */
@@ -283,6 +279,7 @@ static inline int ephe_check_alive_data (struct caml_ephe_ref_elt *re,
       }
     }
   }
+
   return 1;
 }
 
@@ -401,7 +398,7 @@ void caml_empty_minor_heap_domain (struct domain* domain, void* data);
 
 CAMLexport value caml_promote(struct domain* domain, value root)
 {
-  /* ctk21: neuter caml_promote as part of experiment */
+  caml_gc_log("requesting promotion of: %d", root);
   return root;
 
 #if 0
@@ -550,7 +547,6 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
     caml_ev_begin("minor_gc");
     caml_ev_begin("minor_gc/roots");
     caml_do_local_roots(&oldify_one, &st, domain, 0);
-
     caml_scan_stack(&oldify_one, &st, domain_state->current_stack);
 
     for (r = minor_tables->major_ref.base; r < minor_tables->major_ref.ptr; r++) {
@@ -597,7 +593,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
        v lies in any minor heap region (as assumed by Is_minor)
       */
       /*if (Is_block (v) && is_in_interval ((value)Hp_val(v), young_ptr, young_end)) {*/
-      if (Is_minor(v)) {
+      if (Is_block(v) && Is_minor(v)) {
         value vnew;
         header_t hd = Hd_val(v);
         int offset = 0;
@@ -655,6 +651,11 @@ void caml_empty_minor_heap_domain (struct domain* domain, void* unused)
   caml_empty_minor_heap_promote(domain, (void*)0);
   caml_empty_minor_heap_domain_finalizers(domain, (void*)0);
   caml_empty_minor_heap_domain_clear(domain, (void*)0);
+
+#ifdef DEBUG
+  // verify everything in the major heap only contains references to the major heap
+  
+#endif
 }
 
 /* must be called within a STW section */
@@ -697,6 +698,13 @@ void caml_empty_my_minor_heap ()
 
   if (domain_state->young_end - domain_state->young_ptr > 0)
     caml_empty_my_minor_heap();
+}
+
+/* must be called outside a STW section, will retry until we have emptied our minor heap */
+void caml_empty_minor_heaps_once ()
+{
+  while( !caml_try_stw_empty_minor_heap_on_all_domains() )
+    ;
 }
 
 /* Do a minor collection and a slice of major collection, call finalisation

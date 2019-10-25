@@ -991,18 +991,12 @@ static intnat major_collection_slice(intnat howmuch,
 
   if (!domain_state->sweeping_done) {
     caml_ev_begin("major_gc/sweep");
-
+  
     sweep_work = budget;
     do {
       available = budget > Chunk_size ? Chunk_size : budget;
       left = caml_sweep(domain_state->shared_heap, available);
       budget -= available - left;
-      /*
-        FIXME: we would like to handle steal interrupts regularly,
-        but bad things happen if the GC cycles ends via an STW
-        interrupt here.
-      caml_handle_incoming_interrupts();
-      */
     } while (budget > 0 && available != left);
 
     if (budget > 0) {
