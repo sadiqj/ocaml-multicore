@@ -1006,7 +1006,7 @@ endif
 # The runtime system for the native-code compiler
 
 .PHONY: runtimeopt
-runtimeopt: stdlib/libasmrun.$(A)
+runtimeopt: stdlib/libasmrun.$(A) stdlib/libasmrund.$(A)
 
 .PHONY: makeruntimeopt
 makeruntimeopt:
