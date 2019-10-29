@@ -497,6 +497,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
 
   st.promote_domain = domain;
 
+  caml_gc_log("young_end: %ul, young_ptr: %ul", young_end, young_ptr);
+
   if (minor_allocated_bytes != 0) {
     uintnat prev_alloc_words = domain_state->allocated_words;
 

@@ -537,6 +537,12 @@ void caml_verify_root(void* state, value v, value* p)
 static void verify_object(struct heap_verify_state* st, value v) {
   if (!Is_block(v)) return;
 
+  if( Is_minor(v) ) {
+    caml_gc_log("minor in stack: %ul, hd_val: %d", v, Hd_val(v));
+    struct domain* domain = caml_owner_of_young_block(v);
+    caml_gc_log("owner: %d, young_start: %ul, young_end: %ul, young_ptr: %ul, young_limit: %ul", domain->state->id, domain->state->young_start, domain->state->young_end, domain->state->young_ptr, domain->state->young_limit);
+  }
+
   Assert (!Is_minor(v));
   Assert (Hd_val(v));
 

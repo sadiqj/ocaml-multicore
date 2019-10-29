@@ -161,7 +161,6 @@ static void write_barrier(value obj, int field, value old_val, value new_val)
 CAMLexport void caml_modify_field (value obj, int field, value val)
 {
   Assert (Is_block(obj));
-  Assert (!Is_foreign(obj));
   Assert (!Is_block(val) || Wosize_hd (Hd_val (val)) < (1 << 20)); /* !! */
 
   Assert(field >= 0 && field < Wosize_val(obj));
