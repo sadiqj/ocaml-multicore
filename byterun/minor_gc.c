@@ -501,7 +501,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   if (minor_allocated_bytes != 0) {
     uintnat prev_alloc_words = domain_state->allocated_words;
 
-#ifdef 0
+#if 0
     /*
       TODO: when we allow across young-young pointers I don't think this is true any more
     */
