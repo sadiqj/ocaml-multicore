@@ -129,7 +129,6 @@ void caml_cleanup_deleted_roots()
 
   r = roots_all;
   while (Is_block(r)) {
-    Assert(!Is_foreign(Op_val(r)[2]));
     value next = Op_val(r)[2];
     if (Int_field(r, 1) == 0) {
       /* root was deleted, remove from list */

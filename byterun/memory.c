@@ -432,29 +432,6 @@ CAMLexport value caml_read_barrier(value obj, int field)
   CAMLparam1(obj);
   value orig = Op_val(obj)[field];
   CAMLreturn (orig);
-
-#if 0
-  /* A GC may occur just before or just after sending a fault. The obj value
-     must be root. The orig value must *not* be a root, since it may contain a
-     foreign value, which the GC must not see even if it runs just before the
-     fault is handled. */
-  CAMLparam1(obj);
-  value orig = Op_val(obj)[field];
-  value ret;
-
-  if (Is_foreign(orig)) {
-    struct read_fault_req req = {obj, field, &Caml_state->read_fault_ret_val};
-    caml_ev_begin("fault/read");
-    send_read_fault(&req);
-    caml_ev_end("fault/read");
-    ret = caml_read_root(Caml_state->read_fault_ret_val);
-    Assert (!Is_foreign(ret));
-    caml_modify_root(Caml_state->read_fault_ret_val, Val_unit);
-  } else {
-    ret = orig;
-  }
-  CAMLreturn (ret);
-#endif
 }
 
 #ifdef DEBUG
@@ -464,10 +441,6 @@ header_t hd_val (value v) {
 
 int is_minor(value v) {
   return Is_minor(v);
-}
-
-int is_foreign(value v) {
-  return Is_foreign(v);
 }
 
 int is_young(value v) {

@@ -306,10 +306,6 @@ value caml_interprete(code_t prog, asize_t prog_size)
 #else
   while(1) {
 #ifdef DEBUG
-
-    Assert(!Is_foreign(accu));
-    Assert(!Is_foreign(env));
-
     caml_bcodcount++;
     if (caml_icount-- == 0) caml_stop_here ();
     if (caml_params->trace_level>1) printf("\n##%ld\n", caml_bcodcount);
