@@ -7,7 +7,6 @@ let rec even lim put =
   match !r with
   | Some n when n = lim -> ()
   | (Some n) as v when n mod 2 == 0 ->
-     assert (Obj.is_shared (Obj.repr v));
      let next = Some (n + 1) in
      assert (not (Obj.is_shared (Obj.repr next)));
      put next;
@@ -18,7 +17,6 @@ let rec odd lim put =
   match !r with
   | Some n when n = lim -> ()
   | (Some n) as v when n mod 2 == 1 ->
-     assert (Obj.is_shared (Obj.repr v));
      let next = Some (n + 1) in
      assert (not (Obj.is_shared (Obj.repr next)));
      put next;
