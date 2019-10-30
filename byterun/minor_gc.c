@@ -398,7 +398,6 @@ void caml_empty_minor_heap_domain (struct domain* domain, void* data);
 
 CAMLexport value caml_promote(struct domain* domain, value root)
 {
-  caml_gc_log("requesting promotion of: %d", root);
   return root;
 
 #if 0
@@ -645,20 +644,6 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
 /* Make sure the minor heap is empty by performing a minor collection
    if needed.
 */
-
-void caml_empty_minor_heap_domain (struct domain* domain, void* unused)
-{
-  CAMLnoalloc;
-
-  caml_empty_minor_heap_promote(domain, (void*)0);
-  caml_empty_minor_heap_domain_finalizers(domain, (void*)0);
-  caml_empty_minor_heap_domain_clear(domain, (void*)0);
-
-#ifdef DEBUG
-  // verify everything in the major heap only contains references to the major heap
-  
-#endif
-}
 
 /* must be called within a STW section */
 void caml_stw_empty_minor_heap (struct domain* domain, void* unused)

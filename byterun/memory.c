@@ -178,11 +178,10 @@ CAMLexport void caml_modify_field (value obj, int field, value val)
 CAMLexport void caml_initialize_field (value obj, int field, value val)
 {
   Assert(Is_block(obj));
-  Assert(!Is_foreign(obj));
   Assert(0 <= field && field < Wosize_val(obj));
 #ifdef DEBUG
   /* caml_initialize_field can only be used on just-allocated objects */
-  if (Is_young(obj))
+  if (Is_minor(obj))
     Assert(Op_val(obj)[field] == Debug_uninit_minor ||
            Op_val(obj)[field] == Val_unit);
   else
