@@ -6,7 +6,7 @@ let () = Gc.minor ()
 let rec even lim put =
   match !r with
   | Some n when n = lim -> ()
-  | (Some n) as v when n mod 2 == 0 ->
+  | (Some n) when n mod 2 == 0 ->
      let next = Some (n + 1) in
      assert (not (Obj.is_shared (Obj.repr next)));
      put next;
@@ -16,7 +16,7 @@ let rec even lim put =
 let rec odd lim put =
   match !r with
   | Some n when n = lim -> ()
-  | (Some n) as v when n mod 2 == 1 ->
+  | (Some n) when n mod 2 == 1 ->
      let next = Some (n + 1) in
      assert (not (Obj.is_shared (Obj.repr next)));
      put next;
