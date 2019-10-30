@@ -491,58 +491,15 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   char* young_end = domain_state->young_end;
   uintnat minor_allocated_bytes = young_end - young_ptr;
   struct oldify_state st = {0};
+  struct caml_ref_table major_ref_rewrites = {0};
   value **r;
+  value **r_new;
   struct caml_ephe_ref_elt *re;
 
   st.promote_domain = domain;
 
-  caml_gc_log("young_end: %ul, young_ptr: %ul", young_end, young_ptr);
-
   if (minor_allocated_bytes != 0) {
     uintnat prev_alloc_words = domain_state->allocated_words;
-
-#if 0
-    /*
-      TODO: when we allow across young-young pointers I don't think this is true any more
-    */
-    /* In DEBUG mode, verify that the minor_ref table contains all young-young pointers
-       from older to younger objects */
-    {
-    struct addrmap young_young_ptrs = ADDRMAP_INIT;
-    mlsize_t i;
-    value iter;
-    for (r = minor_tables->minor_ref.base; r < minor_tables->minor_ref.ptr; r++) {
-      *caml_addrmap_insert_pos(&young_young_ptrs, (value)*r) = 1;
-    }
-    for (iter = (value)young_ptr;
-         iter < (value)young_end;
-         iter = next_minor_block(domain_state, iter)) {
-      value hd = Hd_hp(iter);
-      if (hd != 0) {
-        value curr = Val_hp(iter);
-        tag_t tag = Tag_hd (hd);
-
-        if (tag < No_scan_tag && tag != Cont_tag) {
-          // FIXME: should scan Cont_tag
-          for (i = 0; i < Wosize_hd(hd); i++) {
-            value* f = Op_val(curr) + i;
-            /* TODO: is it important that:
-             (*f) lies in a valid region of a minor heap
-              or
-             (*f) lies in any minor heap region (as assumed by Is_minor)
-            */
-            /*if (Is_block(*f) && is_in_interval(*f, young_ptr, young_end) &&*/
-            if (Is_minor(*f) &&
-                *f < curr) {
-              CAMLassert(caml_addrmap_contains(&young_young_ptrs, (value)f));
-            }
-          }
-        }
-      }
-    }
-    caml_addrmap_clear(&young_young_ptrs);
-    }
-#endif
 
     caml_gc_log ("Minor collection of domain %d starting", domain->state->id);
     caml_ev_begin("minor_gc");
@@ -553,6 +510,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
     for (r = minor_tables->major_ref.base; r < minor_tables->major_ref.ptr; r++) {
       value x = **r;
       oldify_one (&st, x, &x);
+      /* save pointer to the final location and do atomic update later */
+      Ref_table_add(&major_ref_rewrites, Op_val(x));
     }
     caml_ev_end("minor_gc/roots");
 
@@ -585,8 +544,10 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
     caml_ev_end("minor_gc/ephemerons");
 
     caml_ev_begin("minor_gc/update_minor_tables");
-    for (r = minor_tables->major_ref.base;
-         r < minor_tables->major_ref.ptr; r++) {
+    for (r = minor_tables->major_ref.base, r_new = major_ref_rewrites.base;
+         r < minor_tables->major_ref.ptr;
+         r++, r_new++) {
+      CAMLassert (r_new < major_ref_rewrites.ptr);
       value v = **r;
       /* TODO: is it important that:
        v lies in a valid region of a minor heap
@@ -595,21 +556,9 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
       */
       /*if (Is_block (v) && is_in_interval ((value)Hp_val(v), young_ptr, young_end)) {*/
       if (Is_block(v) && Is_minor(v)) {
-        value vnew;
+        value vnew = (value)*r_new;
         header_t hd = Hd_val(v);
-        int offset = 0;
-        if (Tag_hd(hd) == Infix_tag) {
-          offset = Infix_offset_hd(hd);
-          v -= offset;
-        }
-        CAMLassert (Hd_val(v) == 0);
-        vnew = Op_val(v)[0] + offset;
-        CAMLassert (Is_block(vnew) && !Is_minor(vnew));
-        CAMLassert (Hd_val(vnew));
-        if (Tag_hd(hd) == Infix_tag) {
-          CAMLassert(Tag_val(vnew) == Infix_tag);
-          v += offset;
-        }
+        CAMLassert (!Is_block(vnew) || (!Is_minor(vnew) && Hd_val(vnew) != 0));
         if (caml_domain_alone()) {
           **r = vnew;
           ++rewrite_successes;
