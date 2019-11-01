@@ -101,7 +101,6 @@ void reset_minor_tables(struct caml_minor_tables* r)
 void caml_free_minor_tables(struct caml_minor_tables* r)
 {
   CAMLassert(r->major_ref.ptr == r->major_ref.base);
-  CAMLassert(r->minor_ref.ptr == r->minor_ref.base);
 
   reset_minor_tables(r);
   caml_stat_free(r);
@@ -414,7 +413,9 @@ void caml_empty_minor_heap_domain_clear (struct domain* domain, void* unused)
   if (minor_allocated_bytes != 0)
   {
     clear_table ((struct generic_table *)&minor_tables->major_ref);
+    #ifdef DEBUG
     clear_table ((struct generic_table *)&minor_tables->minor_ref);
+    #endif
     clear_table ((struct generic_table *)&minor_tables->ephe_ref);
     clear_table ((struct generic_table *)&minor_tables->custom);
 
