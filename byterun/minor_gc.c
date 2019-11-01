@@ -271,7 +271,7 @@ static inline int ephe_check_alive_data (struct caml_ephe_ref_elt *re,
   for (i = CAML_EPHE_FIRST_KEY; i < Wosize_val(re->ephe); i++) {
     child = Op_val(re->ephe)[i];
     if (child != caml_ephe_none
-        && Is_block (child) && is_in_interval(child, young_ptr, young_end)) {
+        && Is_block (child) && Is_minor(child)) {
       resolve_infix_val(&child);
       if (Hd_val(child) != 0) {
         /* value not copied to major heap */
@@ -498,96 +498,89 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
 
   st.promote_domain = domain;
 
-  if (minor_allocated_bytes != 0) {
-    uintnat prev_alloc_words = domain_state->allocated_words;
+  uintnat prev_alloc_words = domain_state->allocated_words;
 
-    caml_gc_log ("Minor collection of domain %d starting", domain->state->id);
-    caml_ev_begin("minor_gc");
-    caml_ev_begin("minor_gc/roots");
-    caml_do_local_roots(&oldify_one, &st, domain, 0);
-    caml_scan_stack(&oldify_one, &st, domain_state->current_stack);
+  caml_gc_log ("Minor collection of domain %d starting", domain->state->id);
+  caml_ev_begin("minor_gc");
+  caml_ev_begin("minor_gc/roots");
+  caml_do_local_roots(&oldify_one, &st, domain, 0);
+  caml_scan_stack(&oldify_one, &st, domain_state->current_stack);
 
-    for (r = minor_tables->major_ref.base; r < minor_tables->major_ref.ptr; r++) {
-      value x = **r;
-      oldify_one (&st, x, &x);
-      /* save pointer to the final location and do atomic update later */
-      Ref_table_add(&major_ref_rewrites, Op_val(x));
+  for (r = minor_tables->major_ref.base; r < minor_tables->major_ref.ptr; r++) {
+    value x = **r;
+    oldify_one (&st, x, &x);
+    /* save pointer to the final location and do atomic update later */
+    Ref_table_add(&major_ref_rewrites, Op_val(x));
+  }
+  caml_ev_end("minor_gc/roots");
+
+  caml_ev_begin("minor_gc/promote");
+  oldify_mopup (&st);
+  caml_ev_end("minor_gc/promote");
+
+  caml_ev_begin("minor_gc/ephemerons");
+  for (re = minor_tables->ephe_ref.base;
+        re < minor_tables->ephe_ref.ptr; re++) {
+    CAMLassert (Ephe_domain(re->ephe) == domain);
+    if (re->offset == CAML_EPHE_DATA_OFFSET) {
+      /* Data field has already been handled in oldify_mopup. Handle only
+        * keys here. */
+      continue;
     }
-    caml_ev_end("minor_gc/roots");
-
-    caml_ev_begin("minor_gc/promote");
-    oldify_mopup (&st);
-    caml_ev_end("minor_gc/promote");
-
-    caml_ev_begin("minor_gc/ephemerons");
-    for (re = minor_tables->ephe_ref.base;
-         re < minor_tables->ephe_ref.ptr; re++) {
-      CAMLassert (Ephe_domain(re->ephe) == domain);
-      if (re->offset == CAML_EPHE_DATA_OFFSET) {
-        /* Data field has already been handled in oldify_mopup. Handle only
-         * keys here. */
-        continue;
-      }
-      value* key = &Op_val(re->ephe)[re->offset];
-      if (*key != caml_ephe_none && Is_block(*key) &&
-          Is_minor(*key)) {
-        resolve_infix_val(key);
-        if (Hd_val(*key) == 0) { /* value copied to major heap */
-          *key = Op_val(*key)[0];
-        } else {
-          CAMLassert(!ephe_check_alive_data(re,young_ptr,young_end));
-          *key = caml_ephe_none;
-          Ephe_data(re->ephe) = caml_ephe_none;
-        }
+    value* key = &Op_val(re->ephe)[re->offset];
+    if (*key != caml_ephe_none && Is_block(*key) &&
+        Is_minor(*key)) {
+      resolve_infix_val(key);
+      if (Hd_val(*key) == 0) { /* value copied to major heap */
+        *key = Op_val(*key)[0];
+      } else {
+        // CAMLassert(!ephe_check_alive_data(re,young_ptr,young_end));
+        *key = caml_ephe_none;
+        Ephe_data(re->ephe) = caml_ephe_none;
       }
     }
-    caml_ev_end("minor_gc/ephemerons");
+  }
+  caml_ev_end("minor_gc/ephemerons");
 
-    caml_ev_begin("minor_gc/update_minor_tables");
-    for (r = minor_tables->major_ref.base, r_new = major_ref_rewrites.base;
-         r < minor_tables->major_ref.ptr;
-         r++, r_new++) {
-      CAMLassert (r_new < major_ref_rewrites.ptr);
-      value v = **r;
-      /* TODO: is it important that:
-       v lies in a valid region of a minor heap
-        or
-       v lies in any minor heap region (as assumed by Is_minor)
-      */
-      /*if (Is_block (v) && is_in_interval ((value)Hp_val(v), young_ptr, young_end)) {*/
-      if (Is_block(v) && Is_minor(v)) {
-        value vnew = (value)*r_new;
-        header_t hd = Hd_val(v);
-        CAMLassert (!Is_block(vnew) || (!Is_minor(vnew) && Hd_val(vnew) != 0));
-        if (caml_domain_alone()) {
-          **r = vnew;
+  caml_ev_begin("minor_gc/update_minor_tables");
+  for (r = minor_tables->major_ref.base, r_new = major_ref_rewrites.base;
+        r < minor_tables->major_ref.ptr;
+        r++, r_new++) {
+    CAMLassert (r_new < major_ref_rewrites.ptr);
+    value v = **r;
+    /* TODO: is it important that:
+      v lies in a valid region of a minor heap
+      or
+      v lies in any minor heap region (as assumed by Is_minor)
+    */
+    /*if (Is_block (v) && is_in_interval ((value)Hp_val(v), young_ptr, young_end)) {*/
+    if (Is_block(v) && Is_minor(v)) {
+      value vnew = (value)*r_new;
+      header_t hd = Hd_val(v);
+      CAMLassert (!Is_block(vnew) || (!Is_minor(vnew) && Hd_val(vnew) != 0));
+      if (caml_domain_alone()) {
+        **r = vnew;
+        ++rewrite_successes;
+      } else {
+        if (atomic_compare_exchange_strong((atomic_value*)*r, &v, vnew))
           ++rewrite_successes;
-        } else {
-          if (atomic_compare_exchange_strong((atomic_value*)*r, &v, vnew))
-            ++rewrite_successes;
-          else
-            ++rewrite_failures;
-        }
+        else
+          ++rewrite_failures;
       }
     }
-    CAMLassert (!caml_domain_alone() || rewrite_failures == 0);
-    caml_ev_end("minor_gc/update_minor_tables");
-
-    domain_state->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
-    domain_state->stat_minor_collections++;
-    domain_state->stat_promoted_words += domain_state->allocated_words - prev_alloc_words;
-
-    caml_ev_end("minor_gc");
-    caml_gc_log ("Minor collection of domain %d completed: %2.0f%% of %u KB live, rewrite: successes=%u failures=%u",
-                 domain->state->id,
-                 100.0 * (double)st.live_bytes / (double)minor_allocated_bytes,
-                 (unsigned)(minor_allocated_bytes + 512)/1024, rewrite_successes, rewrite_failures);
   }
-  else
-  {
-    caml_final_empty_young(domain);
-    caml_gc_log ("Minor collection of domain %d: skipping", domain->state->id);
-  }
+  CAMLassert (!caml_domain_alone() || rewrite_failures == 0);
+  caml_ev_end("minor_gc/update_minor_tables");
+
+  domain_state->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
+  domain_state->stat_minor_collections++;
+  domain_state->stat_promoted_words += domain_state->allocated_words - prev_alloc_words;
+
+  caml_ev_end("minor_gc");
+  caml_gc_log ("Minor collection of domain %d completed: %2.0f%% of %u KB live, rewrite: successes=%u failures=%u",
+                domain->state->id,
+                100.0 * (double)st.live_bytes / (double)minor_allocated_bytes,
+                (unsigned)(minor_allocated_bytes + 512)/1024, rewrite_successes, rewrite_failures);
 }
 
 /* Make sure the minor heap is empty by performing a minor collection
