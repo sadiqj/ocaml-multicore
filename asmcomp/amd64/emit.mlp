@@ -359,27 +359,6 @@ let emit_call_bound_errors () =
     emit_call "caml_ml_array_bound_error"
   end
 
-(* read barrier calls *)
-
-type read_barrier_call =
-  { rb_base       : Reg.t;              (* Base register *)
-    rb_off        : Reg.t;              (* Offset register *)
-    rb_dest       : Reg.t;              (* Destination register *)
-    rb_lbl        : label;              (* Entry label *)
-    rb_return_lbl : label;              (* Where to branch after read barrier *)
-    rb_frame      : label }             (* Label of frame descriptor *)
-
-let read_barrier_call_sites = ref ([] : read_barrier_call list)
-
-let emit_call_read_barrier rb =
-  def_label rb.rb_lbl;
-  I.mov (reg rb.rb_base) rax;
-  I.mov (reg rb.rb_off) rdx;
-  emit_call "caml_call_read_barrier";
-  def_label rb.rb_frame;
-  I.mov rax (reg rb.rb_dest);
-  I.jmp (label rb.rb_return_lbl)
-
 (* Names for instructions *)
 
 let instr_for_intop = function
@@ -1017,7 +996,6 @@ let fundecl fundecl =
   call_gc_sites := [];
   bound_error_sites := [];
   bound_error_call := 0;
-  read_barrier_call_sites := [];
   all_functions := fundecl :: !all_functions;
   D.text ();
   D.align 16;
@@ -1067,7 +1045,6 @@ let fundecl fundecl =
   def_label !tailrec_entry_point;
   emit_all true fundecl.fun_body;
   List.iter emit_call_gc !call_gc_sites;
-  List.iter emit_call_read_barrier !read_barrier_call_sites;
   emit_call_bound_errors ();
   (match !handle_overflow with None -> () | Some (overflow,ret) -> begin
     def_label overflow;

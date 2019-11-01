@@ -250,7 +250,7 @@ static value ephe_get_field_domain (value e, value n, struct domain* d, int* rpc
     res = None_val;
   } else {
     if (rpc_success) {
-      Op_val(e)[offset] = elt = caml_promote (d, Op_val(e)[offset]);
+      elt = Op_val(e)[offset];
     }
     caml_darken (0, elt, 0);
     if (rpc_success) {
@@ -292,7 +292,7 @@ static value ephe_get_field_copy_domain (value e, value n, struct domain* d, int
     }
     clean_field (d, e, offset);
     if (rpc_success) {
-      v = Op_val(e)[offset] = caml_promote(d, Op_val(e)[offset]);
+      v = Op_val(e)[offset];
     } else {
       v = Op_val (e)[offset];
     }
@@ -309,7 +309,7 @@ static value ephe_get_field_copy_domain (value e, value n, struct domain* d, int
     }
   } else {
     if (rpc_success) {
-      Op_val(e)[offset] = elt = caml_promote(d, v);
+      Op_val(e)[offset] = elt = v;
     } else {
       caml_darken (0, v, 0);
       elt = v;
@@ -357,7 +357,6 @@ static value ephe_blit_field_produce_domain (value es, value ofs, value len,
   CAMLassert (Ephe_domain(es) == d);
 
   for (i = 0; i < length; i++) {
-    Op_val(es)[offset_s + i] = caml_promote(d, Op_val(es)[offset_s + i]);
     caml_darken(0, Op_val(es)[offset_s + i], 0);
   }
   ar = caml_alloc_shr (length, 0);
@@ -425,7 +424,6 @@ static value ephe_set_field (value e, mlsize_t offset, value el)
     } else if (target == 0) {
       caml_adopt_orphaned_work();
     } else {
-      el = caml_promote(source, el);
       CAMLlocalN(argv,3);
       argv[0] = e;
       argv[1] = Val_long(offset);

@@ -46,9 +46,12 @@ struct caml_custom_elt {
 struct caml_custom_table CAML_TABLE_STRUCT(struct caml_custom_elt);
 
 struct caml_minor_tables {
-  struct caml_ref_table major_ref, minor_ref;
+  struct caml_ref_table major_ref;
   struct caml_ephe_ref_table ephe_ref;
   struct caml_custom_table custom;
+#ifdef DEBUG
+  struct caml_ref_table minor_ref;
+#endif
 };
 
 struct domain;
@@ -58,7 +61,6 @@ extern void caml_stw_empty_minor_heap (struct domain* domain, void* unused); /* 
 extern int caml_try_stw_empty_minor_heap_on_all_domains(); /* out STW */
 extern void caml_empty_minor_heaps_once(); /* out STW */
 CAMLextern void caml_minor_collection (void);
-CAMLextern void forward_pointer (void* domain, value v, value* p);
 CAMLextern void garbage_collection (void); /* def in asmrun/signals.c */
 
 void caml_alloc_table (struct caml_ref_table *tbl, asize_t sz, asize_t rsv);

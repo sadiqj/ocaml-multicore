@@ -145,7 +145,9 @@ static void write_barrier(value obj, int field, value old_val, value new_val)
       /* Add to remembered set */
       Ref_table_add(&domain_state->minor_tables->major_ref, Op_val(obj) + field);
     }
-  } else if (Is_minor(new_val) && new_val < obj) {
+  } 
+  #ifdef DEBUG
+  else if (Is_minor(new_val) && new_val < obj) {
     /* Both obj and new_val are young and new_val is more recent than obj.
       * If old_val is also young, and younger than obj, then it must be the
       * case that `Op_val(obj)+field` is already in minor_ref. We can safely
@@ -156,6 +158,7 @@ static void write_barrier(value obj, int field, value old_val, value new_val)
     /* Add to remembered set */
     Ref_table_add(&domain_state->minor_tables->minor_ref, Op_val(obj) + field);
   }
+  #endif
 }
 
 CAMLexport void caml_modify_field (value obj, int field, value val)
@@ -394,7 +397,6 @@ static void handle_read_fault(struct domain* target, void* reqp, interrupt* done
   value v = Op_val(req->obj)[req->field];
 
   if (Is_minor(v) && caml_owner_of_young_block(v) == target) {
-    ret = caml_promote(target, v);
     caml_modify_root(*req->ret, ret);
     /* Update the field so that future requests don't fault. We must
        use a CAS here, since another thread may modify the field and

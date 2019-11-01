@@ -265,7 +265,6 @@ CAMLexport const value* caml_named_value(char const *name)
     }
   }
   caml_plat_unlock(&named_value_lock);
-
   return Op_val(ret);
 }
 

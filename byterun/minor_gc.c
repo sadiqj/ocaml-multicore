@@ -88,14 +88,22 @@ struct caml_minor_tables* caml_alloc_minor_tables()
   return r;
 }
 
+void reset_minor_tables(struct caml_minor_tables* r)
+{
+  reset_table((struct generic_table *)&r->major_ref);
+  reset_table((struct generic_table *)&r->ephe_ref);
+  reset_table((struct generic_table *)&r->custom);
+#ifdef DEBUG
+  reset_table((struct generic_table *)&r->minor_ref);
+#endif
+}
+
 void caml_free_minor_tables(struct caml_minor_tables* r)
 {
   CAMLassert(r->major_ref.ptr == r->major_ref.base);
   CAMLassert(r->minor_ref.ptr == r->minor_ref.base);
-  reset_table((struct generic_table *)&r->major_ref);
-  reset_table((struct generic_table *)&r->minor_ref);
-  reset_table((struct generic_table *)&r->ephe_ref);
-  reset_table((struct generic_table *)&r->custom);
+
+  reset_minor_tables(r);
   caml_stat_free(r);
 }
 
@@ -109,10 +117,7 @@ void caml_set_minor_heap_size (asize_t wsize)
     caml_fatal_error("Fatal error: No memory for minor heap");
   }
 
-  reset_table ((struct generic_table *)&r->major_ref);
-  reset_table ((struct generic_table *)&r->minor_ref);
-  reset_table ((struct generic_table *)&r->ephe_ref);
-  reset_table((struct generic_table *)&r->custom);
+  reset_minor_tables(r);
 }
 
 //*****************************************************************************
@@ -161,11 +166,8 @@ static void oldify_one (void* st_v, value v, value *p)
   mlsize_t sz, i;
   mlsize_t infix_offset;
   tag_t tag;
-  caml_domain_state* domain_state =
-    st->promote_domain ? st->promote_domain->state : Caml_state;
 
- tail_call:
-  /* TODO: want to follow links in all minor heaps */
+  tail_call:
   if (!(Is_block(v) && Is_minor(v))) {
     /* not a minor block */
     *p = v;
@@ -351,30 +353,6 @@ static void oldify_mopup (struct oldify_state* st)
 
 //*****************************************************************************
 
-void forward_pointer (void* state, value v, value *p) {
-  header_t hd;
-  mlsize_t offset;
-  value fwd;
-  struct domain* promote_domain = state;
-  caml_domain_state* domain_state =
-    promote_domain ? promote_domain->state : Caml_state;
-  char* young_ptr = domain_state->young_ptr;
-  char* young_end = domain_state->young_end;
-
-  if (Is_block (v) && Is_minor(v)) {
-    hd = Hd_val(v);
-    if (hd == 0) {
-      *p = Op_val(v)[0];
-      CAMLassert (Is_block(*p) && !Is_minor(*p));
-    } else if (Tag_hd(hd) == Infix_tag) {
-      offset = Infix_offset_hd(hd);
-      fwd = 0;
-      forward_pointer (state, v - offset, &fwd);
-      if (fwd) *p = fwd + offset;
-    }
-  }
-}
-
 static value next_minor_block(caml_domain_state* domain_state, value curr_hp)
 {
   mlsize_t wsz;
@@ -394,42 +372,9 @@ static value next_minor_block(caml_domain_state* domain_state, value curr_hp)
   return curr_hp + Bsize_wsize(Whsize_wosize(wsz));
 }
 
-void caml_empty_minor_heap_domain (struct domain* domain, void* data);
-
 CAMLexport value caml_promote(struct domain* domain, value root)
 {
   return root;
-
-#if 0
-  caml_domain_state* domain_state = domain->state;
-  uintnat prev_alloc_words = domain_state->allocated_words;
-  struct oldify_state st = {0};
-
-  /* Integers are already shared */
-  if (Is_long(root))
-    return root;
-
-  /* Objects which are in the major heap are already shared. */
-  if (!Is_minor(root))
-    return root;
-
-  st.promote_domain = domain;
-
-  CAMLassert(caml_owner_of_young_block(root) == domain);
-  oldify_one (&st, root, &root);
-  oldify_mopup (&st);
-
-  CAMLassert (!Is_minor(root));
-  /* FIXME: surely a newly-allocated root is already darkened? */
-  caml_darken(0, root, 0);
-
-  /* ctk21: inefficient, but part of refactor to remove caml_promote */
-  caml_gc_log("caml_promote: forcing minor GC. ");
-  caml_empty_minor_heap_domain (domain, (void*)0);
-
-  domain_state->stat_promoted_words += domain_state->allocated_words - prev_alloc_words;
-  return root;
-#endif
 }
 
 //*****************************************************************************
@@ -441,25 +386,21 @@ void caml_empty_minor_heap_domain_finalizers (struct domain* domain, void* unuse
   caml_domain_state* domain_state = domain->state;
   struct caml_minor_tables *minor_tables = domain_state->minor_tables;
   struct caml_custom_elt *elt;
-  uintnat minor_allocated_bytes = domain_state->young_end - domain_state->young_ptr;
 
-  if (minor_allocated_bytes != 0)
-  {
-    caml_ev_begin("minor_gc/finalisers");
-    caml_final_update_last_minor(domain);
-    /* Run custom block finalisation of dead minor values */
-    for (elt = minor_tables->custom.base; elt < minor_tables->custom.ptr; elt++) {
-      value v = elt->block;
-      if (Hd_val(v) == 0) {
-        /* !!caml_adjust_gc_speed(elt->mem, elt->max); */
-      } else {
-        /* Block will be freed: call finalisation function, if any */
-        void (*final_fun)(value) = Custom_ops_val(v)->finalize;
-        if (final_fun != NULL) final_fun(v);
-      }
+  caml_ev_begin("minor_gc/finalisers");
+  caml_final_update_last_minor(domain);
+  /* Run custom block finalisation of dead minor values */
+  for (elt = minor_tables->custom.base; elt < minor_tables->custom.ptr; elt++) {
+    value v = elt->block;
+    if (Hd_val(v) == 0) {
+      /* !!caml_adjust_gc_speed(elt->mem, elt->max); */
+    } else {
+      /* Block will be freed: call finalisation function, if any */
+      void (*final_fun)(value) = Custom_ops_val(v)->finalize;
+      if (final_fun != NULL) final_fun(v);
     }
-    caml_ev_end("minor_gc/finalisers");
   }
+  caml_ev_end("minor_gc/finalisers");
 }
 
 void caml_empty_minor_heap_domain_clear (struct domain* domain, void* unused)
@@ -491,7 +432,6 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   char* young_end = domain_state->young_end;
   uintnat minor_allocated_bytes = young_end - young_ptr;
   struct oldify_state st = {0};
-  struct caml_ref_table major_ref_rewrites = {0};
   value **r;
   value **r_new;
   struct caml_ephe_ref_elt *re;
@@ -507,10 +447,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   caml_scan_stack(&oldify_one, &st, domain_state->current_stack);
 
   for (r = minor_tables->major_ref.base; r < minor_tables->major_ref.ptr; r++) {
-    value x = **r;
-    oldify_one (&st, x, &x);
-    /* save pointer to the final location and do atomic update later */
-    Ref_table_add(&major_ref_rewrites, Op_val(x));
+    oldify_one (&st, **r, *r);
   }
   caml_ev_end("minor_gc/roots");
 
@@ -542,35 +479,13 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   }
   caml_ev_end("minor_gc/ephemerons");
 
-  caml_ev_begin("minor_gc/update_minor_tables");
-  for (r = minor_tables->major_ref.base, r_new = major_ref_rewrites.base;
-        r < minor_tables->major_ref.ptr;
-        r++, r_new++) {
-    CAMLassert (r_new < major_ref_rewrites.ptr);
-    value v = **r;
-    /* TODO: is it important that:
-      v lies in a valid region of a minor heap
-      or
-      v lies in any minor heap region (as assumed by Is_minor)
-    */
-    /*if (Is_block (v) && is_in_interval ((value)Hp_val(v), young_ptr, young_end)) {*/
-    if (Is_block(v) && Is_minor(v)) {
-      value vnew = (value)*r_new;
-      header_t hd = Hd_val(v);
-      CAMLassert (!Is_block(vnew) || (!Is_minor(vnew) && Hd_val(vnew) != 0));
-      if (caml_domain_alone()) {
-        **r = vnew;
-        ++rewrite_successes;
-      } else {
-        if (atomic_compare_exchange_strong((atomic_value*)*r, &v, vnew))
-          ++rewrite_successes;
-        else
-          ++rewrite_failures;
-      }
-    }
+#ifdef DEBUG
+  for (r = minor_tables->major_ref.base;
+       r < minor_tables->major_ref.ptr; r++) {
+    value vnew = **r;
+    CAMLassert (!Is_block(vnew) || (!Is_minor(vnew) && Hd_val(vnew) != 0));
   }
-  CAMLassert (!caml_domain_alone() || rewrite_failures == 0);
-  caml_ev_end("minor_gc/update_minor_tables");
+#endif
 
   domain_state->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
   domain_state->stat_minor_collections++;
@@ -616,17 +531,6 @@ int caml_try_stw_empty_minor_heap_on_all_domains ()
 {
   caml_gc_log("requesting stw empty_minor_heap");
   return caml_try_run_on_all_domains(&caml_stw_empty_minor_heap, (void*)0);
-}
-
-/* must be called outside a STW section, will retry until we have emptied our minor heap */
-void caml_empty_my_minor_heap ()
-{
-  caml_domain_state* domain_state = Caml_state;
-
-  caml_try_stw_empty_minor_heap_on_all_domains();
-
-  if (domain_state->young_end - domain_state->young_ptr > 0)
-    caml_empty_my_minor_heap();
 }
 
 /* must be called outside a STW section, will retry until we have emptied our minor heap */

@@ -388,10 +388,7 @@ CAMLprim value caml_domain_spawn(value callback)
   p.parent = &domain_self->interruptor;
   p.status = Dom_starting;
 
-  p.callback = caml_create_root(caml_promote(&domain_self->state, callback));
-  /* we empty the minor heaps at least once, so that the callback is
-     definitely in the major heap */
-  caml_empty_minor_heaps_once(); /* TODO: can we do this better */
+  p.callback = caml_create_root(callback);
   
   err = pthread_create(&th, 0, domain_thread_func, (void*)&p);
   if (err) {
