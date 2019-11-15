@@ -183,6 +183,8 @@ static void create_domain(uintnat initial_minor_heap_wsize) {
         if (!caml_mem_commit((void*)d->tls_area, (d->tls_area_end - d->tls_area))) {
           /* give up now: if we couldn't get memory for this domain, we're
              unlikely to have better luck with any other */
+          // TODO: Remove this
+          printf("Could not commit memory: %s:%d\n", __FILE__, __LINE__);
           d = 0;
           caml_plat_unlock(&s->lock);
           break;
@@ -256,20 +258,28 @@ static void create_domain(uintnat initial_minor_heap_wsize) {
     goto domain_init_complete;
 
 create_root_failure:
-  if(Caml_state->current_stack != NULL)
+  if(Caml_state->current_stack != NULL) {
     caml_free_stack(Caml_state->current_stack);
+  }
+  printf("create_root_failure: %s:%d\n", __FILE__, __LINE__);
 alloc_main_stack_failure:
+  printf("alloc_main_stack_failure: %s:%d\n", __FILE__, __LINE__);
 reallocate_minor_heap_failure:
   caml_teardown_major_gc();
+  printf("reallocate_minor_heap_failure: %s:%d\n", __FILE__, __LINE__);
 init_major_gc_failure:
   caml_teardown_shared_heap(d->state.state->shared_heap);
+  printf("init_major_gc_failure: %s:%d\n", __FILE__, __LINE__);
 init_shared_heap_failure:
   caml_free_minor_tables(domain_state->minor_tables);
   domain_state->minor_tables = NULL;
+  printf("init_shared_heap_failure: %s:%d\n", __FILE__, __LINE__);
 alloc_minor_tables_failure:
   caml_free_signal_stack();
+  printf("alloc_minor_tables_failure: %s:%d\n", __FILE__, __LINE__);
 init_signal_stack_failure:
   domain_self = NULL;
+  printf("init_signal_stack_failure: %s:%d\n", __FILE__, __LINE__);
 
 domain_init_complete:
   caml_ev_resume();

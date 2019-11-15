@@ -185,6 +185,7 @@ static void* map_fixed(void* mem, uintnat size, int prot)
   if (mmap((void*)mem, size, prot,
            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
            -1, 0) == MAP_FAILED) {
+             printf("mmap of %p %d failed with %d: %s\n", mem, size, errno, strerror(errno));
     return 0;
   } else {
     return mem;
