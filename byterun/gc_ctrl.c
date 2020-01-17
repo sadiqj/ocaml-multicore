@@ -268,7 +268,8 @@ void caml_init_gc ()
   #ifdef NATIVE_CODE
   caml_init_frame_descriptors();
   #endif
-  caml_init_domains(caml_params->init_minor_heap_wsz);
+  caml_init_minor_gc(caml_params->init_minor_heap_wsz);
+  caml_init_domains();
 /*
   caml_major_heap_increment = major_incr;
   caml_percent_free = norm_pfree (percent_fr);

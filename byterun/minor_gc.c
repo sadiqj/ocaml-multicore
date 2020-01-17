@@ -33,6 +33,7 @@
 #include "caml/minor_gc.h"
 #include "caml/misc.h"
 #include "caml/mlvalues.h"
+#include "caml/platform.h"
 #include "caml/roots.h"
 #include "caml/shared_heap.h"
 #include "caml/signals.h"
@@ -40,6 +41,13 @@
 
 extern value caml_ephe_none; /* See weak.c */
 struct generic_table CAML_TABLE_STRUCT(char);
+
+#define DLAB_SIZE 32768
+
+void* minor_heap_base;
+void* minor_heap_limit;
+void* minor_heap_ptr;
+uintnat minor_heap_size;
 
 /* [sz] and [rsv] are numbers of entries */
 static void alloc_generic_table (struct generic_table *tbl, asize_t sz,
@@ -303,9 +311,9 @@ static void oldify_one (void* st_v, value v, value *p)
       }
     } else {
       // Conflict - fix up what we allocated on the major heap
-      int c;
       *Hp_val(result) = Make_header(sz, No_scan_tag, global.MARKED);
       #ifdef DEBUG
+      int c;
       for( c = 0; c < sz ; c++ ) {
         Op_val(result)[c] = Val_long(1);
       }
@@ -745,4 +753,18 @@ void caml_realloc_custom_table (struct caml_custom_table *tbl)
      "custom_table threshold crossed\n",
      "Growing custom_table to %" ARCH_INTNAT_PRINTF_FORMAT "dk bytes\n",
      "custom_table overflow");
+}
+
+void caml_init_minor_gc(uintnat minor_heap_wsz) {
+  /* reserve memory space for the minor heap */
+  uintnat bsize = caml_mem_round_up_pages(Bsize_wsize(minor_heap_wsz));
+  minor_heap_size = Bsize_wsize(minor_heap_wsz);
+  minor_heap_base = caml_mem_map(bsize, 0, 0);
+  if (!minor_heap_base) caml_raise_out_of_memory();
+  minor_heap_limit = minor_heap_base + minor_heap_size;
+  minor_heap_ptr = minor_heap_base;
+}
+
+void caml_alloc_dlab(struct domain* domain) {
+  if( minor_heap_ptr )
 }

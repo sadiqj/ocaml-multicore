@@ -69,6 +69,7 @@ extern void caml_realloc_ephe_ref_table (struct caml_ephe_ref_table *);
 extern void caml_realloc_custom_table (struct caml_custom_table *);
 struct caml_minor_tables* caml_alloc_minor_tables();
 void caml_free_minor_tables(struct caml_minor_tables*);
+void caml_init_minor_gc(uintnat minor_heap_wsize);
 
 CAMLextern value caml_promote(struct domain*, value root);
 

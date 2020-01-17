@@ -160,7 +160,7 @@ int caml_reallocate_minor_heap(asize_t wsize)
 }
 
 /* must be run on the domain's thread */
-static void create_domain(uintnat initial_minor_heap_wsize) {
+static void create_domain() {
   int i;
   dom_internal* d = 0;
   Assert (domain_self == 0);
@@ -234,10 +234,6 @@ static void create_domain(uintnat initial_minor_heap_wsize) {
       goto init_major_gc_failure;
     }
 
-    if(caml_reallocate_minor_heap(initial_minor_heap_wsize) < 0) {
-      goto reallocate_minor_heap_failure;
-    }
-
     Caml_state->current_stack =
         caml_alloc_main_stack(Stack_size / sizeof(value));
     if(Caml_state->current_stack == NULL) {
@@ -260,7 +256,6 @@ create_root_failure:
   if(Caml_state->current_stack != NULL)
     caml_free_stack(Caml_state->current_stack);
 alloc_main_stack_failure:
-reallocate_minor_heap_failure:
   caml_teardown_major_gc();
 init_major_gc_failure:
   caml_teardown_shared_heap(d->state.state->shared_heap);
@@ -278,26 +273,20 @@ domain_init_complete:
   caml_plat_unlock(&all_domains_lock);
 }
 
-void caml_init_domains(uintnat minor_heap_wsz) {
-  int i;
-  uintnat size;
-  void* heaps_base;
+void caml_init_domains() {
+  uintnat i,size, tls_size, rounded_up_state_size;
+  void* tls_base;
 
-  /* sanity check configuration */
-  if (caml_mem_round_up_pages(1 << Minor_heap_align_bits) != (1 << Minor_heap_align_bits))
-    caml_fatal_error("Minor_heap_align_bits misconfigured for this platform");
+  rounded_up_state_size = caml_mem_round_up_pages(sizeof(caml_domain_state));
 
-  /* reserve memory space for minor heaps */
-  size = (uintnat)1 << (Minor_heap_sel_bits + Minor_heap_align_bits);
+  tls_size = rounded_up_state_size * Max_domains;
 
-  heaps_base = caml_mem_map(size*2, size*2, 1 /* reserve_only */);
-  if (!heaps_base) caml_raise_out_of_memory();
+  tls_base = caml_mem_map(tls_size, 0, 0);
 
-  minor_heaps_base = (uintnat) heaps_base;
+  if (!tls_base) caml_raise_out_of_memory();
 
   for (i = 0; i < Max_domains; i++) {
     struct dom_internal* dom = &all_domains[i];
-    uintnat domain_minor_heap_base;
 
     caml_plat_mutex_init(&dom->roots_lock);
 
@@ -310,20 +299,13 @@ void caml_init_domains(uintnat minor_heap_wsz) {
     dom->interruptor.unique_id = i;
     dom->id = i;
 
-    domain_minor_heap_base = minor_heaps_base +
-      (uintnat)(1 << Minor_heap_align_bits) * (uintnat)i;
-    dom->tls_area = domain_minor_heap_base;
+    dom->tls_area = ((uintnat)tls_base + (i * rounded_up_state_size));
     dom->tls_area_end =
       caml_mem_round_up_pages(dom->tls_area +
                               sizeof(caml_domain_state));
-    dom->minor_heap_area = /* skip guard page */
-      caml_mem_round_up_pages(dom->tls_area_end + 1);
-    dom->minor_heap_area_end =
-      domain_minor_heap_base + (1 << Minor_heap_align_bits);
   }
 
-
-  create_domain(minor_heap_wsz);
+  create_domain();
   if (!domain_self) caml_fatal_error("Failed to create main domain");
 
   caml_init_signal_handling();
@@ -350,7 +332,7 @@ static void* domain_thread_func(void* v) {
   struct domain_startup_params* p = v;
   caml_root callback = p->callback;
 
-  create_domain(caml_params->init_minor_heap_wsz);
+  create_domain();
   p->newdom = domain_self;
 
   caml_plat_lock(&p->parent->lock);
