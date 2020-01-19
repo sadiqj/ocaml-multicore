@@ -20,6 +20,8 @@
 #include "addrmap.h"
 #include "config.h"
 
+#define WORKSHARE_BUFFER_SIZE 256
+
 #define CAML_TABLE_STRUCT(t) { \
   t *base;                     \
   t *end;                      \
@@ -53,6 +55,7 @@ struct caml_minor_tables {
   struct caml_ref_table minor_ref;
 #endif
 };
+
 
 struct caml_minor_work {
   value* p;

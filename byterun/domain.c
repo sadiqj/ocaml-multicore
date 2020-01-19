@@ -156,7 +156,15 @@ int caml_reallocate_minor_heap(asize_t wsize)
   domain_state->young_start = (char*)domain_self->minor_heap_area;
   domain_state->young_end = (char*)(domain_self->minor_heap_area + Bsize_wsize(wsize));
   domain_state->young_ptr = domain_state->young_end;
+
+  domain_state->workshare_buffer = (struct caml_minor_work*)caml_stat_alloc(WORKSHARE_BUFFER_SIZE * sizeof(struct caml_minor_work));
+  atomic_init(&domain_state->workshare_state, 0);
+
   return 0;
+}
+
+void caml_teardown_minor_heap() {
+  caml_stat_free(Caml_state->workshare_buffer);
 }
 
 /* must be run on the domain's thread */
@@ -260,6 +268,7 @@ create_root_failure:
     caml_free_stack(Caml_state->current_stack);
 alloc_main_stack_failure:
 reallocate_minor_heap_failure:
+  caml_teardown_minor_heap();
   caml_teardown_major_gc();
 init_major_gc_failure:
   caml_teardown_shared_heap(d->state.state->shared_heap);

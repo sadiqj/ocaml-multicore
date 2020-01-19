@@ -111,6 +111,12 @@ DOMAIN_STATE(uintnat, call_imm)
 DOMAIN_STATE(uintnat, call_ind)
 DOMAIN_STATE(uintnat, stackoverflow_checks)
 
+/*****************************************************************************/
+/* Minor GC worksharing */
+/*****************************************************************************/
+DOMAIN_STATE(atomic_uintnat, workshare_state)
+DOMAIN_STATE(struct caml_minor_work*, workshare_buffer)
+
 #ifdef DEBUG
 // whether or not a domain is inside of a stop-the-world handler
 // this is used for several debug assertions inside of methods that
