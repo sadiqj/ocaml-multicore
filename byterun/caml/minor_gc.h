@@ -54,6 +54,11 @@ struct caml_minor_tables {
 #endif
 };
 
+struct caml_minor_work {
+  value* p;
+  value v;
+};
+
 struct domain;
 
 extern void caml_set_minor_heap_size (asize_t); /* size in bytes */

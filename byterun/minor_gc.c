@@ -304,7 +304,6 @@ static void oldify_one (void* st_v, value v, value *p)
       }
     } else {
       // Conflict - fix up what we allocated on the major heap
-      int c;
       *Hp_val(result) = Make_header(sz, No_scan_tag, global.MARKED);
       #ifdef DEBUG
       for( c = 0; c < sz ; c++ ) {
@@ -386,12 +385,43 @@ static inline int ephe_check_alive_data (struct caml_ephe_ref_elt *re,
   return 1;
 }
 
+#define WORK_BUFFER_SIZE 32
+
+static void oldify_mopup (struct oldify_state* st);
+
+void flush_work_buffer(struct caml_minor_work* buffer, int* work_count) {
+  struct oldify_state st = {0};
+  int c;
+  for( c = 0 ; c < WORK_BUFFER_SIZE ; c++ ) {
+    oldify_one(&st, buffer[c].v, buffer[c].p);
+  }
+
+  oldify_mopup(&st);
+
+  *work_count = 0;
+}
+
+
+void add_to_work_buffer(struct caml_minor_work* buffer, int* work_count, value v, value* p) {
+  *work_count += 1;
+
+  if( *work_count == WORK_BUFFER_SIZE ) {
+    printf("flushing work buffer\n");
+    flush_work_buffer(buffer, work_count);
+  }
+  buffer[*work_count].p = p;
+  buffer[*work_count].v = v;
+}
+
 /* Finish the work that was put off by [oldify_one].
    Note that [oldify_one] itself is called by oldify_mopup, so we
    have to be careful to remove the first entry from the list before
    oldifying its fields. */
 static void oldify_mopup (struct oldify_state* st)
 {
+  struct caml_minor_work work_buffer[WORK_BUFFER_SIZE];
+  int work_count = 0;
+
   value v, new_v, f;
   mlsize_t i;
   caml_domain_state* domain_state =
@@ -414,13 +444,13 @@ static void oldify_mopup (struct oldify_state* st)
     f = Op_val (new_v)[0];
     CAMLassert (!Is_debug_tag(f));
     if (Is_block (f) && Is_minor(f)) {
-      oldify_one (st, f, Op_val (new_v));
+      add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v));
     }
     for (i = 1; i < Wosize_val (new_v); i++){
       f = Op_val (v)[i];
       CAMLassert (!Is_debug_tag(f));
       if (Is_block (f) && Is_minor(f)) {
-        oldify_one (st, f, Op_val (new_v) + i);
+        add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v) + i);
       } else {
         Op_val (new_v)[i] = f;
       }
