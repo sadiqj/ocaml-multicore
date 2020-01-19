@@ -387,37 +387,35 @@ static inline int ephe_check_alive_data (struct caml_ephe_ref_elt *re,
 
 #define WORK_BUFFER_SIZE 32
 
-static void oldify_mopup (struct oldify_state* st);
+static void oldify_mopup (struct oldify_state* st, int work_share);
 
-void flush_work_buffer(struct caml_minor_work* buffer, int* work_count) {
+void flush_work_buffer(struct caml_minor_work* buffer, int* work_count ) {
   struct oldify_state st = {0};
   int c;
-  for( c = 0 ; c < WORK_BUFFER_SIZE ; c++ ) {
+  for( c = 0 ; c < *work_count ; c++ ) {
     oldify_one(&st, buffer[c].v, buffer[c].p);
   }
 
-  oldify_mopup(&st);
-
-  *work_count = 0;
+  oldify_mopup(&st, 0 /* don't workshare */);
 }
 
 
 void add_to_work_buffer(struct caml_minor_work* buffer, int* work_count, value v, value* p) {
-  *work_count += 1;
-
   if( *work_count == WORK_BUFFER_SIZE ) {
-    printf("flushing work buffer\n");
     flush_work_buffer(buffer, work_count);
+    *work_count = 0;
   }
   buffer[*work_count].p = p;
   buffer[*work_count].v = v;
+
+  *work_count += 1;
 }
 
 /* Finish the work that was put off by [oldify_one].
    Note that [oldify_one] itself is called by oldify_mopup, so we
    have to be careful to remove the first entry from the list before
    oldifying its fields. */
-static void oldify_mopup (struct oldify_state* st)
+static void oldify_mopup (struct oldify_state* st, int work_share)
 {
   struct caml_minor_work work_buffer[WORK_BUFFER_SIZE];
   int work_count = 0;
@@ -444,18 +442,30 @@ static void oldify_mopup (struct oldify_state* st)
     f = Op_val (new_v)[0];
     CAMLassert (!Is_debug_tag(f));
     if (Is_block (f) && Is_minor(f)) {
-      add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v));
+      if( work_share ) {
+        add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v));
+      } else {
+        oldify_one(st, f, Op_val(new_v));
+      }
     }
     for (i = 1; i < Wosize_val (new_v); i++){
       f = Op_val (v)[i];
       CAMLassert (!Is_debug_tag(f));
       if (Is_block (f) && Is_minor(f)) {
-        add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v) + i);
+        if( work_share ) {
+          add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v) + i);
+        } else {
+          oldify_one(st, f, Op_val(new_v) + i);
+        }
       } else {
         Op_val (new_v)[i] = f;
       }
     }
     CAMLassert (Wosize_val(new_v));
+  }
+
+  if( work_share ) {
+    flush_work_buffer(work_buffer, &work_count);
   }
 
   /* Oldify the data in the minor heap of alive ephemeron
@@ -479,7 +489,7 @@ static void oldify_mopup (struct oldify_state* st)
     }
   }
 
-  if (redo) oldify_mopup (st);
+  if (redo) oldify_mopup (st, 0);
 }
 
 //*****************************************************************************
@@ -583,7 +593,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   caml_ev_end("minor_gc/roots");
 
   caml_ev_begin("minor_gc/promote");
-  oldify_mopup (&st);
+  oldify_mopup (&st, 1);
   caml_ev_end("minor_gc/promote");
 
   caml_ev_begin("minor_gc/ephemerons");
