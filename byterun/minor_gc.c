@@ -17,6 +17,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "caml/addrmap.h"
 #include "caml/config.h"
@@ -40,6 +41,10 @@
 
 extern value caml_ephe_none; /* See weak.c */
 struct generic_table CAML_TABLE_STRUCT(char);
+
+static struct domain* domains_finished_promote[Max_domains];
+static atomic_intnat domains_finished_promote_count;
+static atomic_intnat domains_participating_in_promotion;
 
 /* [sz] and [rsv] are numbers of entries */
 static void alloc_generic_table (struct generic_table *tbl, asize_t sz,
@@ -306,8 +311,11 @@ static void oldify_one (void* st_v, value v, value *p)
       // Conflict - fix up what we allocated on the major heap
       *Hp_val(result) = Make_header(sz, No_scan_tag, global.MARKED);
       #ifdef DEBUG
-      for( c = 0; c < sz ; c++ ) {
-        Op_val(result)[c] = Val_long(1);
+      {
+        int c;
+        for( c = 0; c < sz ; c++ ) {
+          Op_val(result)[c] = Val_long(1);
+        }
       }
       #endif
     }
@@ -385,56 +393,85 @@ static inline int ephe_check_alive_data (struct caml_ephe_ref_elt *re,
   return 1;
 }
 
-int workshare_offer_buffer(struct domain* domain, struct caml_minor_work* offered_buffer) {
-    caml_domain_state* domain_state = Caml_state;
+int workshare_offer_buffer(struct domain* other_domain, struct caml_minor_work* offered_buffer) {
+  caml_domain_state* domain_state = other_domain->state;
 
-    intnat tmp_state = atomic_load_explicit(&domain_state->workshare_state, memory_order_relaxed);
+  intnat tmp_state = atomic_load_explicit(&domain_state->workshare_state, memory_order_relaxed);
 
-    if( tmp_state == 0 ) {
-      // Try to get ownership of this buffer
-      if( atomic_compare_exchange_strong(&domain_state->workshare_state, &tmp_state, 1) ) {
-          memcpy(&domain_state->workshare_buffer, offered_buffer, WORKSHARE_BUFFER_SIZE * sizeof(struct caml_minor_work));
+  if( tmp_state == 0 ) {
+    // Try to get ownership of this buffer
+    if( atomic_compare_exchange_strong(&domain_state->workshare_state, &tmp_state, 1) ) {
+        memcpy(&domain_state->workshare_buffer, offered_buffer, WORKSHARE_BUFFER_SIZE * sizeof(struct caml_minor_work));
 
-          atomic_thread_fence(memory_order_release);
-          atomic_store_explicit(&domain_state->workshare_state, 2, memory_order_release);
+        atomic_thread_fence(memory_order_release);
+        atomic_store_explicit(&domain_state->workshare_state, 2, memory_order_release);
 
-          return 1;
-      }
-    }
-    
-    return 0;
-}
-
-int workshare_try_read_buffer(struct domain* domain, struct caml_minor_work* private_buffer) {
-    caml_domain_state* domain_state = Caml_state;
-
-    if( atomic_load_explicit(&domain_state->workshare_state, memory_order_acquire) ) {
-        memcpy(private_buffer, &domain_state->workshare_buffer, WORKSHARE_BUFFER_SIZE * sizeof(struct caml_minor_work));
-        atomic_thread_fence(memory_order_acquire);
-        atomic_store_explicit(&domain_state->workshare_state, 0, memory_order_release);
         return 1;
     }
+  }
+  
+  return 0;
+}
 
-    return 0;
+int workshare_try_read_buffer(struct caml_minor_work* private_buffer) {
+  caml_domain_state* domain_state = Caml_state;
+
+  if( atomic_load_explicit(&domain_state->workshare_state, memory_order_acquire) == 2 ) {
+      memcpy(private_buffer, &domain_state->workshare_buffer, WORKSHARE_BUFFER_SIZE * sizeof(struct caml_minor_work));
+      atomic_thread_fence(memory_order_acquire);
+      atomic_store_explicit(&domain_state->workshare_state, 0, memory_order_release);
+      return 1;
+  }
+
+  return 0;
 }
 
 static void oldify_mopup (struct oldify_state* st, int workshare, int check_ephemerons);
 
-void flush_work_buffer(struct caml_minor_work* buffer, int* work_count ) {
+int share_work_buffer(struct caml_minor_work* buffer) {
+  int d, s;
+  int finished_count = atomic_load_explicit(&domains_finished_promote_count, memory_order_acquire);
+
+  CAMLassert(domains_finished_promote_count >= 0);
+
+  // TODO: Probably need some heuristic here for how many domains should be finished before we start
+  // trying to farm off work
+  if( finished_count == 0 ) return 0;
+
+  s = (rand() % finished_count);
+  d = s;
+  do {
+    if( workshare_offer_buffer(domains_finished_promote[d], buffer) )
+    {
+      return 1;
+    }
+    d = (s++) % finished_count; // TODO: We should probably not do the entire lot, maybe only advance a couple?
+  } while( d != s );
+
+  return 0;
+}
+
+void process_workshare_buffer(struct caml_minor_work* buffer, int work_count) {
   struct oldify_state st = {0};
   int c;
-  for( c = 0 ; c < *work_count ; c++ ) {
+  
+  for( c = 0 ; c < work_count ; c++ ) {
     oldify_one(&st, buffer[c].v, buffer[c].p);
   }
 
   oldify_mopup(&st, 0 /* don't workshare */, 0);
 }
 
-
 void add_to_work_buffer(struct caml_minor_work* buffer, int* work_count, value v, value* p) {
   if( *work_count == WORKSHARE_BUFFER_SIZE ) {
-    flush_work_buffer(buffer, work_count);
-    *work_count = 0;
+    if( share_work_buffer(buffer) ) {
+      *work_count = 0;
+    }
+    else 
+    {
+      // In this case we didn't manage to share the buffer, so we should just do the work ourselves
+      process_workshare_buffer(buffer, WORKSHARE_BUFFER_SIZE);
+    }
   }
   buffer[*work_count].p = p;
   buffer[*work_count].v = v;
@@ -446,7 +483,7 @@ void add_to_work_buffer(struct caml_minor_work* buffer, int* work_count, value v
    Note that [oldify_one] itself is called by oldify_mopup, so we
    have to be careful to remove the first entry from the list before
    oldifying its fields. */
-static void oldify_mopup (struct oldify_state* st, int workshare, int check_ephemerons)
+static void oldify_mopup (struct oldify_state* st, int workshare, int do_ephemerons)
 {
   struct caml_minor_work work_buffer[WORKSHARE_BUFFER_SIZE];
   int work_count = 0;
@@ -460,7 +497,7 @@ static void oldify_mopup (struct oldify_state* st, int workshare, int check_ephe
   char* young_ptr = domain_state->young_ptr;
   char* young_end = domain_state->young_end;
   int redo = 0;
-  int am_alone = caml_domain_alone();
+  int is_alone = caml_domain_alone();
 
   while (st->todo_list != 0) {
     v = st->todo_list;                 /* Get the head. */
@@ -474,7 +511,7 @@ static void oldify_mopup (struct oldify_state* st, int workshare, int check_ephe
     f = Op_val (new_v)[0];
     CAMLassert (!Is_debug_tag(f));
     if (Is_block (f) && Is_minor(f)) {
-      if( !am_alone && workshare ) {
+      if( !is_alone && workshare ) {
         add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v));
       } else {
         oldify_one(st, f, Op_val(new_v));
@@ -484,7 +521,7 @@ static void oldify_mopup (struct oldify_state* st, int workshare, int check_ephe
       f = Op_val (v)[i];
       CAMLassert (!Is_debug_tag(f));
       if (Is_block (f) && Is_minor(f)) {
-        if( !am_alone && workshare ) {
+        if( !is_alone && workshare ) {
           add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v) + i);
         } else {
           oldify_one(st, f, Op_val(new_v) + i);
@@ -496,11 +533,11 @@ static void oldify_mopup (struct oldify_state* st, int workshare, int check_ephe
     CAMLassert (Wosize_val(new_v));
   }
 
-  if( !am_alone && workshare ) {
-    flush_work_buffer(work_buffer, &work_count);
+  if( !is_alone && workshare ) {
+    process_workshare_buffer(work_buffer, work_count);
   }
 
-  if( check_ephemerons ) {
+  if( do_ephemerons ) {
     /* Oldify the data in the minor heap of alive ephemeron
       During minor collection keys outside the minor heap are considered alive */
     for (re = ephe_ref_table.base;
@@ -554,8 +591,6 @@ CAMLexport value caml_promote(struct domain* domain, value root)
 
 //*****************************************************************************
 
-
-
 void caml_empty_minor_heap_domain_finalizers (struct domain* domain, void* unused)
 {
   caml_domain_state* domain_state = domain->state;
@@ -606,8 +641,6 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   uintnat minor_allocated_bytes = young_end - young_ptr;
   struct oldify_state st = {0};
   value **r;
-  value **r_new;
-  struct caml_ephe_ref_elt *re;
 
   st.promote_domain = domain;
 
@@ -655,6 +688,15 @@ void caml_final_oldify_cleanup (struct domain* domain) {
   struct caml_ephe_ref_elt *re;
   caml_domain_state* domain_state = domain->state;
   struct caml_minor_tables *minor_tables = domain_state->minor_tables;  
+  int is_alone = caml_domain_alone();
+
+  if( !is_alone ) {
+    struct caml_minor_work buffer[WORKSHARE_BUFFER_SIZE];
+
+    if( workshare_try_read_buffer(buffer) ) {
+      process_workshare_buffer(buffer, WORKSHARE_BUFFER_SIZE);
+    }
+  }
 
   oldify_mopup(&st, 0, 1);
 
@@ -682,17 +724,15 @@ void caml_final_oldify_cleanup (struct domain* domain) {
   caml_ev_end("minor_gc/ephemerons");  
 }
 
-/* Make sure the minor heap is empty by performing a minor collection
-   if needed.
-*/
-
-static struct domain* domains_finished_promote[Max_domains];
-static atomic_intnat domains_finished_promote_count;
-static atomic_intnat domains_participating_in_promotion;
-
 void caml_participate_in_promotion(struct domain* domain) {
+  struct caml_minor_work buffer[WORKSHARE_BUFFER_SIZE];
+
   while( atomic_load_explicit(&domains_participating_in_promotion, memory_order_acquire) > atomic_load_explicit(&domains_finished_promote_count, memory_order_acquire) ) {
-    
+    if( workshare_try_read_buffer(buffer) ) {
+      process_workshare_buffer(buffer, WORKSHARE_BUFFER_SIZE);
+    } else {
+      // TODO: probably worth backing off here..
+    }
   }
 }
 
@@ -720,11 +760,20 @@ void caml_stw_empty_minor_heap (struct domain* domain, void* unused)
   atomic_fetch_add_explicit(&domains_participating_in_promotion, 1, memory_order_acq_rel);
   caml_gc_log("running stw empty_minor_heap_promote");
   caml_empty_minor_heap_promote(domain, 0);
-  intnat finished_count = atomic_fetch_add_explicit(&domains_finished_promote_count, 1, memory_order_acq_rel);
-  domains_finished_promote[finished_count] = caml_domain_self();
-  atomic_thread_fence(memory_order_release);
 
-  caml_participate_in_promotion(domain);
+  int is_alone = caml_domain_alone();
+
+  // if we're not alone, start worksharing if we finish a promote early
+  if( !is_alone ) {
+    intnat finished_count = atomic_fetch_add_explicit(&domains_finished_promote_count, 1, memory_order_acq_rel);
+    domains_finished_promote[finished_count] = caml_domain_self();
+    atomic_thread_fence(memory_order_release);
+    caml_participate_in_promotion(domain);
+
+    b = caml_global_barrier_begin();
+    caml_global_barrier_end(b);
+  }
+
   caml_final_oldify_cleanup(domain);
 
   b = caml_global_barrier_begin();
