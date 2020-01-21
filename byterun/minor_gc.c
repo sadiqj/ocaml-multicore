@@ -630,28 +630,6 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
   oldify_mopup (&st, 1, 0);
   caml_ev_end("minor_gc/promote");
 
-  caml_ev_begin("minor_gc/ephemerons");
-  for (re = minor_tables->ephe_ref.base;
-       re < minor_tables->ephe_ref.ptr; re++) {
-    CAMLassert (Ephe_domain(re->ephe) == domain);
-    if (re->offset == CAML_EPHE_DATA_OFFSET) {
-      /* Data field has already been handled in oldify_mopup. Handle only
-       * keys here. */
-      continue;
-    }
-    value* key = &Op_val(re->ephe)[re->offset];
-    if (*key != caml_ephe_none && Is_block(*key) && Is_minor(*key)) {
-      resolve_infix_val(key);
-      if (get_header_val(*key) == 0) { /* value copied to major heap */
-        *key = Op_val(*key)[0];
-      } else {
-        // CAMLassert(!ephe_check_alive_data(re,young_ptr,young_end));
-        *key = caml_ephe_none;
-        Ephe_data(re->ephe) = caml_ephe_none;
-      }
-    }
-  }
-  caml_ev_end("minor_gc/ephemerons");
 
 #ifdef DEBUG
   for (r = minor_tables->major_ref.base;
@@ -674,7 +652,34 @@ void caml_empty_minor_heap_promote (struct domain* domain, void* unused)
 
 void caml_final_oldify_cleanup (struct domain* domain) {
   struct oldify_state st = {0};
+  struct caml_ephe_ref_elt *re;
+  caml_domain_state* domain_state = domain->state;
+  struct caml_minor_tables *minor_tables = domain_state->minor_tables;  
+
   oldify_mopup(&st, 0, 1);
+
+  caml_ev_begin("minor_gc/ephemerons");
+  for (re = minor_tables->ephe_ref.base;
+       re < minor_tables->ephe_ref.ptr; re++) {
+    CAMLassert (Ephe_domain(re->ephe) == domain);
+    if (re->offset == CAML_EPHE_DATA_OFFSET) {
+      /* Data field has already been handled in oldify_mopup. Handle only
+       * keys here. */
+      continue;
+    }
+    value* key = &Op_val(re->ephe)[re->offset];
+    if (*key != caml_ephe_none && Is_block(*key) && Is_minor(*key)) {
+      resolve_infix_val(key);
+      if (get_header_val(*key) == 0) { /* value copied to major heap */
+        *key = Op_val(*key)[0];
+      } else {
+        // CAMLassert(!ephe_check_alive_data(re,young_ptr,young_end));
+        *key = caml_ephe_none;
+        Ephe_data(re->ephe) = caml_ephe_none;
+      }
+    }
+  }
+  caml_ev_end("minor_gc/ephemerons");  
 }
 
 /* Make sure the minor heap is empty by performing a minor collection
