@@ -312,9 +312,8 @@ static void oldify_one (void* st_v, value v, value *p)
       *Hp_val(result) = Make_header(sz, No_scan_tag, global.MARKED);
       #ifdef DEBUG
       {
-        int c;
-        for( c = 0; c < sz ; c++ ) {
-          Op_val(result)[c] = Val_long(1);
+        for( i = 0; i < sz ; i++ ) {
+          Op_val(result)[i] = Val_long(1);
         }
       }
       #endif
