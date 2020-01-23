@@ -444,7 +444,7 @@ int share_work_buffer(struct caml_minor_work* buffer) {
     {
       return 1;
     }
-    d = (s++) % finished_count; // TODO: We should probably not do the entire lot, maybe only advance a couple?
+    d = (d++) % finished_count; // TODO: We should probably not do the entire lot, maybe only advance a couple?
   } while( d != s );
 
   return 0;
