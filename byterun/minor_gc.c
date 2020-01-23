@@ -463,7 +463,9 @@ void process_workshare_buffer(struct caml_minor_work* buffer, int work_count) {
 
 void add_to_work_buffer(struct caml_minor_work* buffer, int* work_count, value v, value* p) {
   if( *work_count == WORKSHARE_BUFFER_SIZE ) {
+    printf("trying to share buffer..\n");
     if( share_work_buffer(buffer) ) {
+      printf("shared buffer..\n");
       *work_count = 0;
     }
     else 
@@ -475,7 +477,8 @@ void add_to_work_buffer(struct caml_minor_work* buffer, int* work_count, value v
   buffer[*work_count].p = p;
   buffer[*work_count].v = v;
 
-  *work_count += 1;
+  printf("work_count: %d\n", *work_count);
+  *work_count = *work_count + 1;
 }
 
 /* Finish the work that was put off by [oldify_one].
@@ -689,6 +692,8 @@ void caml_final_oldify_cleanup (struct domain* domain) {
   struct caml_minor_tables *minor_tables = domain_state->minor_tables;  
   int is_alone = caml_domain_alone();
 
+  caml_ev_begin("minor_gc/oldify_cleanup");
+
   if( !is_alone ) {
     struct caml_minor_work buffer[WORKSHARE_BUFFER_SIZE];
 
@@ -698,6 +703,8 @@ void caml_final_oldify_cleanup (struct domain* domain) {
   }
 
   oldify_mopup(&st, 0, 1);
+
+  caml_ev_end("minor_gc/oldify_cleanup");
 
   caml_ev_begin("minor_gc/ephemerons");
   for (re = minor_tables->ephe_ref.base;
@@ -720,19 +727,26 @@ void caml_final_oldify_cleanup (struct domain* domain) {
       }
     }
   }
-  caml_ev_end("minor_gc/ephemerons");  
+  caml_ev_end("minor_gc/ephemerons");
 }
 
 void caml_participate_in_promotion(struct domain* domain) {
   struct caml_minor_work buffer[WORKSHARE_BUFFER_SIZE];
 
+  caml_ev_begin("minor_gc/workshare");
+
   while( atomic_load_explicit(&domains_participating_in_promotion, memory_order_acquire) > atomic_load_explicit(&domains_finished_promote_count, memory_order_acquire) ) {
     if( workshare_try_read_buffer(buffer) ) {
+      caml_ev_begin("minor_gc/workshare/process");
+      printf("processing workshare buffer\n");
       process_workshare_buffer(buffer, WORKSHARE_BUFFER_SIZE);
+      caml_ev_end("minor_gc/workshare/process");
     } else {
       // TODO: probably worth backing off here..
     }
   }
+
+  caml_ev_end("minor_gc/workshare");
 }
 
 /* must be called within a STW section */
