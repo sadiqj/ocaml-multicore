@@ -34,6 +34,7 @@
 #include "caml/minor_gc.h"
 #include "caml/misc.h"
 #include "caml/mlvalues.h"
+#include "caml/platform.h"
 #include "caml/roots.h"
 #include "caml/shared_heap.h"
 #include "caml/signals.h"
@@ -477,7 +478,6 @@ void add_to_work_buffer(struct caml_minor_work* buffer, int* work_count, value v
   buffer[*work_count].p = p;
   buffer[*work_count].v = v;
 
-  printf("work_count: %d\n", *work_count);
   *work_count = *work_count + 1;
 }
 
@@ -743,6 +743,7 @@ void caml_participate_in_promotion(struct domain* domain) {
       caml_ev_end("minor_gc/workshare/process");
     } else {
       // TODO: probably worth backing off here..
+      cpu_relax();
     }
   }
 
