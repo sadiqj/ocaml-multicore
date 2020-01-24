@@ -486,7 +486,7 @@ static void oldify_mopup (struct oldify_state* st, int workshare, int do_ephemer
 {
   struct caml_minor_work work_buffer[WORKSHARE_BUFFER_SIZE];
   int work_count = 0;
-
+  int total_work_count = 0;
   value v, new_v, f;
   mlsize_t i;
   caml_domain_state* domain_state =
@@ -512,6 +512,7 @@ static void oldify_mopup (struct oldify_state* st, int workshare, int do_ephemer
     if (Is_block (f) && Is_minor(f)) {
       if( !is_alone && workshare ) {
         add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v));
+        total_work_count++;
       } else {
         oldify_one(st, f, Op_val(new_v));
       }
@@ -522,6 +523,7 @@ static void oldify_mopup (struct oldify_state* st, int workshare, int do_ephemer
       if (Is_block (f) && Is_minor(f)) {
         if( !is_alone && workshare ) {
           add_to_work_buffer(work_buffer, &work_count, f, Op_val(new_v) + i);
+          total_work_count++;
         } else {
           oldify_one(st, f, Op_val(new_v) + i);
         }
@@ -534,6 +536,7 @@ static void oldify_mopup (struct oldify_state* st, int workshare, int do_ephemer
 
   if( !is_alone && workshare ) {
     process_workshare_buffer(work_buffer, work_count);
+    caml_gc_log("total_work_count: %d", total_work_count);
   }
 
   if( do_ephemerons ) {
