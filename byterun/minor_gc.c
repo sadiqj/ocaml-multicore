@@ -464,17 +464,14 @@ void process_workshare_buffer(struct caml_minor_work* buffer, int work_count) {
 
 void add_to_work_buffer(struct caml_minor_work* buffer, int* work_count, value v, value* p) {
   if( *work_count == WORKSHARE_BUFFER_SIZE ) {
-    printf("trying to share buffer..\n");
-    if( share_work_buffer(buffer) ) {
-      printf("shared buffer..\n");
-      *work_count = 0;
-    }
-    else 
-    {
+    if( !share_work_buffer(buffer) ) {
       // In this case we didn't manage to share the buffer, so we should just do the work ourselves
       process_workshare_buffer(buffer, WORKSHARE_BUFFER_SIZE);
     }
+
+    *work_count = 0;
   }
+
   buffer[*work_count].p = p;
   buffer[*work_count].v = v;
 
@@ -738,7 +735,6 @@ void caml_participate_in_promotion(struct domain* domain) {
   while( atomic_load_explicit(&domains_participating_in_promotion, memory_order_acquire) > atomic_load_explicit(&domains_finished_promote_count, memory_order_acquire) ) {
     if( workshare_try_read_buffer(buffer) ) {
       caml_ev_begin("minor_gc/workshare/process");
-      printf("processing workshare buffer\n");
       process_workshare_buffer(buffer, WORKSHARE_BUFFER_SIZE);
       caml_ev_end("minor_gc/workshare/process");
     } else {

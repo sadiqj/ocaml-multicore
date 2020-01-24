@@ -20,7 +20,7 @@
 #include "addrmap.h"
 #include "config.h"
 
-#define WORKSHARE_BUFFER_SIZE 8
+#define WORKSHARE_BUFFER_SIZE 4
 
 #define CAML_TABLE_STRUCT(t) { \
   t *base;                     \
