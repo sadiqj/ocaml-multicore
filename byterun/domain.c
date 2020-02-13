@@ -1097,9 +1097,9 @@ CAMLprim value caml_ml_domain_yield(value unused)
       caml_plat_wait(&s->cond);
     } else {
       caml_plat_unlock(&s->lock);
-      caml_major_collection_slice(Chunk_size, &left);
+      /*caml_major_collection_slice(Chunk_size, &left);
       if (left == Chunk_size)
-        found_work = 0;
+        found_work = 0;*/
       caml_plat_lock(&s->lock);
     }
   }
