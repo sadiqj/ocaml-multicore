@@ -655,10 +655,13 @@ void caml_empty_minor_heap_promote (struct domain* domain, int domains_in_minor_
   domain_state->stat_promoted_words += domain_state->allocated_words - prev_alloc_words;
 
   caml_ev_end("minor_gc");
-  caml_gc_log ("Minor collection of domain %d completed: %2.0f%% of %u KB live, rewrite: successes=%u failures=%u",
+  caml_gc_log ("Minor collection %d of domain %d completed: %2.0f%% of %u KB (%2.0f%%) live, rewrite: successes=%u failures=%u",
+               caml_minor_cycles_started,
                domain->state->id,
                100.0 * (double)st.live_bytes / (double)minor_allocated_bytes,
-               (unsigned)(minor_allocated_bytes + 512)/1024, rewrite_successes, rewrite_failures);
+               (unsigned)(minor_allocated_bytes + 512)/1024, 
+               100.0 * (double)minor_allocated_bytes / (double)(Caml_state->minor_heap_wsz*sizeof(intnat)/2),
+               rewrite_successes, rewrite_failures);
 }
 
 /* Make sure the minor heap is empty by performing a minor collection
