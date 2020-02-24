@@ -786,7 +786,7 @@ void caml_handle_gc_interrupt() {
     }
     Caml_state->force_major_slice = 0;
     caml_handle_incoming_interrupts();
-    caml_major_collection_slice(0,0);
+    caml_opportunistic_major_collection_slice(0,0);
   }
 }
 
