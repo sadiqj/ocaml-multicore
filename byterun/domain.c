@@ -538,6 +538,12 @@ int caml_try_run_on_all_domains(void (*handler)(struct domain*, void*), void* da
   int i;
   uintnat domains_participating = 1;
 
+  // Don't take the lock if there's already a stw leader
+  if( stw_leader ) {
+    caml_handle_incoming_interrupts(); 
+    return 0;
+  }
+
   caml_gc_log("requesting STW");
 
   /* Try to take the lock by setting ourselves as the stw_leader.

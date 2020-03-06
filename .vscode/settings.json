@@ -1,0 +1,12 @@
+{
+    "files.associations": {
+        "*.ml": "ocaml",
+        "*.tbl": "c",
+        "functional": "cpp",
+        "*.cuh": "c",
+        "algorithm": "c",
+        "stdint.h": "c",
+        "camlatomic.h": "c",
+        "stdatomic.h": "c"
+    }
+}
