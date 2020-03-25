@@ -56,5 +56,7 @@ void* lockfree_queue_pop(struct lockfree_queue* queue) {
             
             new_head = atomic_load(&(((struct queue_item*)current_head)->next));
         } while(!atomic_compare_exchange_strong(&queue->head, (intptr_t*)&current_head, (intptr_t)new_head));
+
+        return current_head;
     }
 }
