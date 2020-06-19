@@ -618,13 +618,15 @@ void oldify_steal(struct oldify_state* st, int participating_count, struct domai
       return;
     }
 
-    while( atomic_load_explicit(&domains_idle, memory_order_acquire) < participating_count ) {
+    while( atomic_load_explicit(&domains_idle, memory_order_relaxed) < participating_count ) {
       for( int c = 0; c < participating_count ; c++ ) {
         struct domain* foreign_domain = participating[c];
-        if( foreign_domain != self ) {
+        if( foreign_domain != self && size_todo(foreign_domain->state->minor_todo_queue) > 0 ) {
           goto outer; /* work to steal */
         }
       }
+
+      cpu_relax();
     }
   
     outer:
