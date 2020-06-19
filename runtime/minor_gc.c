@@ -699,6 +699,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
     atomic_fetch_add_explicit(&domains_finished_minor_gc, 1, memory_order_release);
   }
 
+  destroy_todo(&st.todo);
+
   domain_state->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
   domain_state->stat_minor_collections++;
   domain_state->stat_promoted_words += domain_state->allocated_words - prev_alloc_words;
