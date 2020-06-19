@@ -136,8 +136,41 @@ void caml_set_minor_heap_size (asize_t wsize)
 
 //*****************************************************************************
 
+struct todo_queue {
+  value* queue;
+  uintnat size;
+  uintnat count;
+};
+
+static void init_todo(struct todo_queue* todo) {
+  todo->queue = caml_stat_alloc_noexc(sizeof(value) * caml_params->init_minor_heap_wsz/2);
+  todo->size = caml_params->init_minor_heap_wsz/2;
+  todo->count = 0;
+}
+
+static void destroy_todo(struct todo_queue* todo) {
+  caml_stat_free(todo->queue);
+  todo->size = 0;
+  todo->count = 0;
+}
+
+static void add_todo(struct todo_queue* todo, value v) {
+  if( todo->count == todo->size ) {
+    abort();
+  }
+  todo->queue[todo->count++] = v;
+}
+
+static value pop_todo(struct todo_queue* todo) {
+  if( todo->count > 0 ) {
+    return todo->queue[--todo->count];
+  }
+
+  return 0;
+}
+
 struct oldify_state {
-  value todo_list;
+  struct todo_queue todo;
   uintnat live_bytes;
   struct domain* promote_domain;
 };
@@ -307,8 +340,7 @@ static void oldify_one (void* st_v, value v, value *p)
     if( try_update_object_header(v, p, result, infix_offset) ) {
       if (sz > 1){
         Op_val (result)[0] = field0;
-        Op_val (result)[1] = st->todo_list;
-        st->todo_list = v;
+        add_todo(&st->todo, v);
       } else {
         CAMLassert (sz == 1);
         p = Op_val(result);
@@ -419,14 +451,12 @@ static void oldify_mopup (struct oldify_state* st, int do_ephemerons)
   struct caml_ephe_ref_elt *re;
   int redo = 0;
 
-  while (st->todo_list != 0) {
-    v = st->todo_list;                 /* Get the head. */
+  while ((v = pop_todo(&st->todo)) != 0) {
     /* I'm not convinced we can ever have something in todo_list that was updated
     by another domain, so this assert using get_header_val is probably not
     neccessary */
     CAMLassert (get_header_val(v) == 0);       /* It must be forwarded. */
     new_v = Op_val (v)[0];                /* Follow forward pointer. */
-    st->todo_list = Op_val (new_v)[1]; /* Remove from list. */
 
     f = Op_val (new_v)[0];
     CAMLassert (!Is_debug_tag(f));
@@ -531,6 +561,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   value **r;
   intnat c, curr_idx;
 
+  init_todo(&st.todo);
   st.promote_domain = domain;
 
   /* TODO: are there any optimizations we can make where we don't need to scan
