@@ -43,9 +43,11 @@
 extern value caml_ephe_none; /* See weak.c */
 struct generic_table CAML_TABLE_STRUCT(char);
 
+static atomic_intnat domains_finished_own_roots;
 static atomic_intnat domains_finished_minor_gc;
 
 static atomic_uintnat caml_minor_cycles_started = 0;
+static atomic_uintnat domains_idle = 0;
 
 double caml_extra_heap_resources_minor = 0;
 
@@ -136,41 +138,84 @@ void caml_set_minor_heap_size (asize_t wsize)
 
 //*****************************************************************************
 
-struct todo_queue {
-  value* queue;
-  uintnat size;
-  uintnat count;
-};
-
-static void init_todo(struct todo_queue* todo) {
-  todo->queue = caml_stat_alloc_noexc(sizeof(value) * caml_params->init_minor_heap_wsz/2);
-  todo->size = caml_params->init_minor_heap_wsz/2;
-  todo->count = 0;
-}
-
-static void destroy_todo(struct todo_queue* todo) {
-  caml_stat_free(todo->queue);
-  todo->size = 0;
-  todo->count = 0;
-}
-
-static void add_todo(struct todo_queue* todo, value v) {
-  if( todo->count == todo->size ) {
-    abort();
+static void init_todo(struct minor_todo_queue* todo) {
+  if( todo->tasks == NULL ) {
+    todo->tasks = caml_stat_alloc_noexc(sizeof(value) * caml_params->init_minor_heap_wsz/2);
   }
-  todo->queue[todo->count++] = v;
-}
-
-static value pop_todo(struct todo_queue* todo) {
-  if( todo->count > 0 ) {
-    return todo->queue[--todo->count];
+  if( todo->tasks < 0 ) {
+    caml_fatal_error("Fatal error: no memory for minor gc tasks queue");
   }
 
-  return 0;
+  todo->capacity = caml_params->init_minor_heap_wsz/2;
+  atomic_store_explicit(&todo->busy, 1, memory_order_release);
+}
+
+/*
+static void empty_todo(struct minor_todo_queue* todo) {
+  caml_stat_free(todo->tasks);
+  todo->capacity = 0;
+}
+*/
+
+static uintnat size_todo(struct minor_todo_queue* todo) {
+  uintnat anchor = todo->anchor;
+  uintnat tail = anchor>>8;
+
+  return tail;
+}
+
+static void put_todo(struct minor_todo_queue* todo, value v) {
+  uintnat anchor = todo->anchor;
+  uintnat tail = anchor>>8;
+  uintnat tag = anchor&255;
+
+  if( tail == todo->capacity ) {
+    abort(); // TODO
+  }
+
+  todo->tasks[tail] = v;
+  todo->anchor = ((tail+1) << 8) + ((tag+1)&255);
+}
+
+static value take_todo(struct minor_todo_queue* todo) {
+  uintnat anchor = todo->anchor;
+  uintnat tail = anchor>>8; 
+  uintnat tag = anchor&255;
+
+  if( tail == 0 ) {
+    return 0;
+  }
+
+  value v = todo->tasks[tail-1];
+
+  todo->anchor = ((tail-1)<<8) + tag;
+
+  return v;
+}
+
+static value steal_todo(struct minor_todo_queue* todo) {
+  uintnat anchor, tail, tag;
+
+  retry:
+  anchor = todo->anchor;
+  tail = anchor>>8;
+  tag = anchor&255;
+
+  if( tail == 0 ) {
+    return 0;
+  }
+
+  value* a = todo->tasks;
+  value v = a[tail-1];
+
+  if( !atomic_compare_exchange_strong((atomic_uintnat*)&todo->anchor, &anchor, ((tail-1)<<8) + tag) ) {
+    goto retry;
+  }
+
+  return v;
 }
 
 struct oldify_state {
-  struct todo_queue todo;
   uintnat live_bytes;
   struct domain* promote_domain;
 };
@@ -343,7 +388,7 @@ static void oldify_one (void* st_v, value v, value *p)
     if( try_update_object_header(v, p, result, infix_offset) ) {
       if (sz > 1){
         Op_val (result)[0] = field0;
-        add_todo(&st->todo, v);
+        put_todo(Caml_state->minor_todo_queue, v);
       } else {
         CAMLassert (sz == 1);
         p = Op_val(result);
@@ -454,7 +499,7 @@ static void oldify_mopup (struct oldify_state* st, int do_ephemerons)
   struct caml_ephe_ref_elt *re;
   int redo = 0;
 
-  while ((v = pop_todo(&st->todo)) != 0) {
+  while ((v = take_todo(Caml_state->minor_todo_queue)) != 0) {
     /* I'm not convinced we can ever have something in todo_list that was updated
     by another domain, so this assert using get_header_val is probably not
     neccessary */
@@ -550,6 +595,50 @@ void caml_empty_minor_heap_domain_clear (struct domain* domain, void* unused)
   clear_table ((struct generic_table *)&minor_tables->custom);
 }
 
+/* Adapted from algorithm 13.23 from The GC Book */
+void oldify_steal(struct oldify_state* st, int participating_count, struct domain** participating) {
+  struct domain* self = caml_domain_self();
+
+  while( 1 ) {
+    for( int c = 0; c < participating_count ; c++ ) {
+      struct domain* foreign_domain = participating[c];
+      if( foreign_domain != self ) {
+        value v = steal_todo(foreign_domain->state->minor_todo_queue);
+
+        if( v != 0 ) {
+          put_todo(self->state->minor_todo_queue, v);
+          break;
+        }
+      }
+    }
+
+    if( size_todo(self->state->minor_todo_queue) > 0 ) 
+    {
+      oldify_mopup(st, 0);
+    }
+
+    if( atomic_fetch_add_explicit(&domains_idle, 1, memory_order_acq_rel) == participating_count ) {
+      return;
+    }
+
+    while( atomic_load_explicit(&domains_idle, memory_order_acquire) < participating_count ) {
+      for( int c = 0; c < participating_count ; c++ ) {
+        struct domain* foreign_domain = participating[c];
+        if( foreign_domain != self ) {
+          goto outer; /* work to steal */
+        }
+      }
+    }
+  
+    outer:
+    if( atomic_load_explicit(&domains_idle, memory_order_acquire) == participating_count ) {
+      return;
+    }
+
+    atomic_fetch_add_explicit(&domains_idle, -1, memory_order_acq_rel);
+  }
+}
+
 void caml_empty_minor_heap_promote (struct domain* domain, int participating_count, struct domain** participating, int not_alone)
 {
   caml_domain_state* domain_state = domain->state;
@@ -562,9 +651,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   uintnat minor_allocated_bytes = young_end - young_ptr;
   struct oldify_state st = {0};
   value **r;
-  intnat c, curr_idx;
 
-  init_todo(&st.todo);
+  init_todo(Caml_state->minor_todo_queue);
   st.promote_domain = domain;
 
   /* TODO: are there any optimizations we can make where we don't need to scan
@@ -577,7 +665,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
 
   int remembered_roots = 0;
 
-  if( not_alone ) {
+  /*if( not_alone ) {
     int participating_idx = -1;
     struct domain* domain_self = caml_domain_self();
 
@@ -623,13 +711,12 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
     }
   }
   else
+  {*/
+
+  for( r = self_minor_tables->major_ref.base ; r < self_minor_tables->major_ref.ptr ; r++ )
   {
-    // If we're alone, we just do our own remembered set
-    for( r = self_minor_tables->major_ref.base ; r < self_minor_tables->major_ref.ptr ; r++ )
-    {
-      oldify_one (&st, **r, *r);
-      remembered_roots++;
-    }
+    oldify_one (&st, **r, *r);
+    remembered_roots++;
   }
 
   #ifdef DEBUG
@@ -692,6 +779,17 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   caml_ev_end("minor_gc/local_roots/promote");
   caml_ev_end("minor_gc/local_roots");
 
+  if( not_alone ) {
+    atomic_fetch_add_explicit(&domains_finished_own_roots, 1, memory_order_release);
+  }
+
+  caml_ev_begin("minor_gc/steal");
+  if( not_alone ) {
+    oldify_steal (&st, participating_count, participating);
+    oldify_mopup(&st, 0);
+  }
+  caml_ev_end("minor_gc/steal");
+
   /* we reset these pointers before allowing any mutators to be
      released to avoid races where another domain signals an interrupt
      and we clobber it */
@@ -702,7 +800,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
     atomic_fetch_add_explicit(&domains_finished_minor_gc, 1, memory_order_release);
   }
 
-  destroy_todo(&st.todo);
+  /* need to figure out when it is safe to do this */
+  /* empty_todo(&Caml_state->minor_todo_queue); */
 
   domain_state->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
   domain_state->stat_minor_collections++;
@@ -721,6 +820,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
 
 void caml_empty_minor_heap_setup(struct domain* domain) {
   atomic_store_explicit(&domains_finished_minor_gc, 0, memory_order_release);
+  atomic_store_explicit(&domains_finished_own_roots, 0, memory_order_release);
+  atomic_store_explicit(&domains_idle, 0, memory_order_release);
 }
 
 /* must be called within a STW section */

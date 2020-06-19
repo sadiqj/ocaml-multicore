@@ -51,6 +51,13 @@ struct caml_minor_tables {
   struct caml_custom_table custom;
 };
 
+struct minor_todo_queue {
+  uintnat anchor; // (tail,tag)
+  value* tasks;
+  uintnat capacity;
+  atomic_uintnat busy;
+};
+
 struct domain;
 
 extern void caml_set_minor_heap_size (asize_t); /* size in bytes */
