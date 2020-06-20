@@ -791,9 +791,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   }
 
   caml_ev_begin("minor_gc/steal");
-  if( 0 /* not_alone */ ) {
+  if( not_alone ) {
     oldify_steal (&st, participating_count, participating);
-    oldify_mopup(&st, 0);
   }
   CAMLassert(size_todo(Caml_state->minor_todo_queue) == 0);
   caml_ev_end("minor_gc/steal");
