@@ -614,7 +614,7 @@ void oldify_steal(struct oldify_state* st, int participating_count, struct domai
       }
     }
 
-    if( size_todo(self->state->minor_todo_queue) > 0 ) 
+    while( size_todo(self->state->minor_todo_queue) > 0 ) 
     {
       oldify_mopup(st, 0);
     }
