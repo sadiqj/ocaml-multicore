@@ -147,7 +147,7 @@ static void init_todo(struct minor_todo_queue* todo) {
   }
 
   todo->capacity = caml_params->init_minor_heap_wsz/2;
-  atomic_store_explicit(&todo->busy, 1, memory_order_release);
+  todo->anchor = 0;
 }
 
 /*
@@ -157,58 +157,63 @@ static void empty_todo(struct minor_todo_queue* todo) {
 }
 */
 
+/* THESE ONLY WORKS ON 64-BIT ARCHS */
+#define HEAD_FROM_ANCHOR(anchor) ((anchor)>>32) 
+#define SIZE_FROM_ANCHOR(anchor) ((anchor)&((1L << 32)-1L))
+#define ANCHOR_FROM(head,size) (((head) << 32) + (size))
+
 static uintnat size_todo(struct minor_todo_queue* todo) {
   uintnat anchor = todo->anchor;
-  uintnat tail = anchor>>8;
+  uintnat size = SIZE_FROM_ANCHOR(anchor); 
 
-  return tail;
+  return size;
 }
 
 static void put_todo(struct minor_todo_queue* todo, value v) {
   uintnat anchor = todo->anchor;
-  uintnat tail = anchor>>8;
-  uintnat tag = anchor&255;
+  uintnat head = HEAD_FROM_ANCHOR(anchor);
+  uintnat size = SIZE_FROM_ANCHOR(anchor);
 
-  if( tail == todo->capacity ) {
+  if( size == todo->capacity ) {
     abort(); // TODO
   }
 
-  todo->tasks[tail] = v;
-  todo->anchor = ((tail+1) << 8) + ((tag+1)&255);
+  todo->tasks[(head+size) % todo->capacity] = v;
+  todo->anchor = ANCHOR_FROM(head,size+1);
 }
 
 static value take_todo(struct minor_todo_queue* todo) {
   uintnat anchor = todo->anchor;
-  uintnat tail = anchor>>8; 
-  uintnat tag = anchor&255;
+  uintnat head = HEAD_FROM_ANCHOR(anchor);
+  uintnat size = SIZE_FROM_ANCHOR(anchor);
 
-  if( tail == 0 ) {
+  if( size == 0 ) {
     return 0;
   }
 
-  value v = todo->tasks[tail-1];
+  value v = todo->tasks[(head+size-1) % todo->capacity];
 
-  todo->anchor = ((tail-1)<<8) + tag;
+  todo->anchor = ANCHOR_FROM(head,size-1);
 
   return v;
 }
 
 static value steal_todo(struct minor_todo_queue* todo) {
-  uintnat anchor, tail, tag;
-
+  uintnat anchor, head, size;
+  
   retry:
   anchor = todo->anchor;
-  tail = anchor>>8;
-  tag = anchor&255;
+  head = HEAD_FROM_ANCHOR(anchor);
+  size = SIZE_FROM_ANCHOR(anchor);
 
-  if( tail == 0 ) {
+  if( size == 0 ) {
     return 0;
   }
 
-  value* a = todo->tasks;
-  value v = a[tail-1];
+  value v = todo->tasks[head % todo->capacity];
+  uintnat head2 = (head+1) % todo->capacity;
 
-  if( !atomic_compare_exchange_strong((atomic_uintnat*)&todo->anchor, &anchor, ((tail-1)<<8) + tag) ) {
+  if( !atomic_compare_exchange_strong((atomic_uintnat*)&todo->anchor, &anchor, ANCHOR_FROM(head2,size-1))) {
     goto retry;
   }
 
@@ -624,7 +629,7 @@ void oldify_steal(struct oldify_state* st, int participating_count, struct domai
     while( atomic_load_explicit(&domains_idle, memory_order_relaxed) < participating_count ) {
       for( int c = 0; c < participating_count ; c++ ) {
         struct domain* foreign_domain = participating[c];
-        if( foreign_domain != self && size_todo(foreign_domain->state->minor_todo_queue) > 0 ) {
+        if( size_todo(foreign_domain->state->minor_todo_queue) > 0 ) {
           goto outer; /* work to steal */
         }
       }
@@ -790,6 +795,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
     oldify_steal (&st, participating_count, participating);
     oldify_mopup(&st, 0);
   }
+  CAMLassert(size_todo(Caml_state->minor_todo_queue) == 0);
   caml_ev_end("minor_gc/steal");
 
   /* we reset these pointers before allowing any mutators to be
