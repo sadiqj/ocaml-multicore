@@ -51,10 +51,22 @@ struct caml_minor_tables {
   struct caml_custom_table custom;
 };
 
-struct minor_todo_queue {
-  uintnat anchor; // (head,size)
+struct todo_private_queue {
   value* tasks;
+  uintnat size;
   uintnat capacity;
+};
+
+struct todo_public_queue {
+  atomic_int domain_owner;
+  atomic_uintnat size;
+  atomic_uintnat capacity;
+  value* tasks;
+} __attribute__((__aligned__(64)));
+
+struct minor_todo {
+  struct todo_private_queue private_queue;
+  struct todo_public_queue public_queue;
 };
 
 struct domain;
@@ -71,7 +83,9 @@ extern void caml_realloc_ref_table (struct caml_ref_table *);
 extern void caml_realloc_ephe_ref_table (struct caml_ephe_ref_table *);
 extern void caml_realloc_custom_table (struct caml_custom_table *);
 struct caml_minor_tables* caml_alloc_minor_tables();
+struct minor_todo* caml_alloc_minor_todo();
 void caml_free_minor_tables(struct caml_minor_tables*);
+void caml_free_minor_todo(struct minor_todo*);
 void caml_empty_minor_heap_setup(struct domain* domain);
 
 #ifdef DEBUG

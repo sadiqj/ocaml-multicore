@@ -89,6 +89,24 @@ static void clear_table (struct generic_table *tbl)
     tbl->limit = tbl->threshold;
 }
 
+#define MINOR_TODO_PRIVATE_QUEUE_INIT_SIZE 1024*1024
+#define MINOR_TODO_PUBLIC_QUEUE_INIT_SIZE 1024*1024
+
+struct minor_todo* caml_alloc_minor_todo() {
+  struct minor_todo* minor_todo = caml_stat_alloc_noexc(sizeof(struct minor_todo));
+
+  minor_todo->public_queue.tasks = caml_stat_alloc_noexc(sizeof(value)*MINOR_TODO_PUBLIC_QUEUE_INIT_SIZE);
+  minor_todo->public_queue.capacity = MINOR_TODO_PUBLIC_QUEUE_INIT_SIZE;
+  minor_todo->public_queue.size = 0;
+  minor_todo->public_queue.domain_owner = Max_domains+1; // Unowned
+
+  minor_todo->private_queue.tasks = caml_stat_alloc_noexc(sizeof(value)*MINOR_TODO_PRIVATE_QUEUE_INIT_SIZE);
+  minor_todo->private_queue.capacity = MINOR_TODO_PRIVATE_QUEUE_INIT_SIZE;
+  minor_todo->private_queue.size = 0;
+
+  return minor_todo;
+}
+
 struct caml_minor_tables* caml_alloc_minor_tables()
 {
   struct caml_minor_tables *r =
@@ -103,6 +121,13 @@ void reset_minor_tables(struct caml_minor_tables* r)
   reset_table((struct generic_table *)&r->major_ref);
   reset_table((struct generic_table *)&r->ephe_ref);
   reset_table((struct generic_table *)&r->custom);
+}
+
+void caml_free_minor_todo(struct minor_todo* todo) 
+{
+  caml_stat_free(todo->public_queue.tasks);
+  caml_stat_free(todo->private_queue.tasks);
+  caml_stat_free(todo);  
 }
 
 void caml_free_minor_tables(struct caml_minor_tables* r)
@@ -138,86 +163,128 @@ void caml_set_minor_heap_size (asize_t wsize)
 
 //*****************************************************************************
 
-static void init_todo(struct minor_todo_queue* todo) {
-  if( todo->tasks == NULL ) {
-    todo->tasks = caml_stat_alloc_noexc(sizeof(value) * caml_params->init_minor_heap_wsz/2);
-  }
-  if( todo->tasks < 0 ) {
-    caml_fatal_error("Fatal error: no memory for minor gc tasks queue");
-  }
-
-  todo->capacity = caml_params->init_minor_heap_wsz/2;
-  todo->anchor = 0;
+static void init_todo(struct minor_todo* todo) {
 }
 
 /*
-static void empty_todo(struct minor_todo_queue* todo) {
-  caml_stat_free(todo->tasks);
-  todo->capacity = 0;
+static void empty_todo(struct minor_todo* todo) {
 }
 */
 
-/* THESE ONLY WORKS ON 64-BIT ARCHS */
-#define HEAD_FROM_ANCHOR(anchor) ((anchor)>>32) 
-#define SIZE_FROM_ANCHOR(anchor) ((anchor)&((1L << 32)-1L))
-#define ANCHOR_FROM(head,size) (((head) << 32) + (size))
-
-static uintnat size_todo(struct minor_todo_queue* todo) {
-  uintnat anchor = todo->anchor;
-  uintnat size = SIZE_FROM_ANCHOR(anchor); 
-
-  return size;
+static uintnat size_todo(struct minor_todo* todo) {
+  return atomic_load(&todo->public_queue.size);
 }
 
-static void put_todo(struct minor_todo_queue* todo, value v) {
-  uintnat anchor = todo->anchor;
-  uintnat head = HEAD_FROM_ANCHOR(anchor);
-  uintnat size = SIZE_FROM_ANCHOR(anchor);
+#define TODO_ITEMS_TO_STEAL 128
+#define TODO_PRIVATE_QUEUE_SHARE_THRESHOLD 1024
+#define TODO_PRIVATE_QUEUE_SHARE_QUANTITY 512
 
-  if( size == todo->capacity ) {
-    abort(); // TODO
+static void put_todo(struct minor_todo* todo, value v) {
+  if( todo->private_queue.size == todo->private_queue.capacity ) {
+    abort();
   }
 
-  todo->tasks[(head+size) % todo->capacity] = v;
-  todo->anchor = ANCHOR_FROM(head,size+1);
+  todo->private_queue.tasks[todo->private_queue.size++] = v;
+
+  if( !caml_domain_alone() && todo->private_queue.size > TODO_PRIVATE_QUEUE_SHARE_THRESHOLD ) 
+  {
+    // Try to dump some of these from our private queue to the public queue
+    int owner = atomic_load(&todo->public_queue.domain_owner);
+
+    if( owner == Max_domains+1 ) {
+      int our_id = caml_domain_self()->state->id;
+
+      if( atomic_compare_exchange_strong(&todo->public_queue.domain_owner, &owner, our_id) ) {
+        int c, i;
+        int public_size = atomic_load(&todo->public_queue.size);
+
+        i = todo->private_queue.size - TODO_PRIVATE_QUEUE_SHARE_QUANTITY;
+
+        for( c = public_size ; c < public_size+TODO_PRIVATE_QUEUE_SHARE_QUANTITY ; c++ ) {
+          todo->public_queue.tasks[c] = todo->private_queue.tasks[i++];
+        }
+
+        todo->private_queue.size -= TODO_PRIVATE_QUEUE_SHARE_QUANTITY;
+
+        atomic_thread_fence(memory_order_release);
+        atomic_store(&todo->public_queue.size, public_size+TODO_PRIVATE_QUEUE_SHARE_QUANTITY);
+        atomic_store(&todo->public_queue.domain_owner, Max_domains+1);
+      }
+    }
+  }
 }
 
-static value take_todo(struct minor_todo_queue* todo) {
-  uintnat anchor = todo->anchor;
-  uintnat head = HEAD_FROM_ANCHOR(anchor);
-  uintnat size = SIZE_FROM_ANCHOR(anchor);
+static int steal_todo(struct minor_todo* todo, struct minor_todo* foreign_todo) {
+  int stolen = 0;
+  // Check to see if the foreign_todo has anything in it
+  if( atomic_load(&foreign_todo->public_queue.size) > 0 ) {
+    // If it has, check if it is currently owned
+    int owner = atomic_load(&foreign_todo->public_queue.domain_owner);
 
-  if( size == 0 ) {
+    if( owner == Max_domains+1 ) {
+      // Public queue isn't currently owned, it's try to take ownership
+      int our_id = caml_domain_self()->state->id;
+
+      if( atomic_compare_exchange_strong(&foreign_todo->public_queue.domain_owner, &owner, our_id) ) {
+        int c, u, new_size, public_queue_size;
+        // Took ownership. Drain ITEMS_TO_STEAL if available.
+        CAMLassert(todo->private_queue.size == 0); // We should only be calling steal if we have nothing to do
+
+        u = atomic_load(&foreign_todo->public_queue.size);
+        if( u > TODO_ITEMS_TO_STEAL ) {
+          u -= TODO_ITEMS_TO_STEAL;
+        } else {
+          u = 0;
+        }
+
+        new_size = u;
+
+        public_queue_size = atomic_load(&foreign_todo->public_queue.size);
+
+        for(c = 0; u < public_queue_size ; u++, c++ ) {
+          todo->private_queue.tasks[c] = foreign_todo->public_queue.tasks[u];
+        }
+
+        todo->private_queue.size = c;
+        stolen = c;
+
+        atomic_store(&foreign_todo->public_queue.size, new_size);
+        atomic_thread_fence(memory_order_release);
+        atomic_store(&foreign_todo->public_queue.domain_owner, Max_domains+1);
+      }
+      else
+      {
+        return -1; // We collided with someone else
+      }
+    } else {
+      return -1;
+    }
+  }
+
+  return stolen;
+}
+
+static value take_todo(struct minor_todo* todo) {
+  if( todo->private_queue.size == 0 && !caml_domain_alone() ) {
+    // We can do this because only we add things to our public queue
+    // so at worse we're going to over-estimate how much there is
+    // in there
+    if( atomic_load(&todo->public_queue.size) > 0 ) {
+      while( 1 ) {
+        int stolen = steal_todo(todo, todo);
+
+        if( stolen >= 0 ) {
+          break;
+        }
+      }
+    }
+  }
+
+  if( todo->private_queue.size == 0 ) {
     return 0;
   }
 
-  value v = todo->tasks[(head+size-1) % todo->capacity];
-
-  todo->anchor = ANCHOR_FROM(head,size-1);
-
-  return v;
-}
-
-static value steal_todo(struct minor_todo_queue* todo) {
-  uintnat anchor, head, size;
-  
-  retry:
-  anchor = todo->anchor;
-  head = HEAD_FROM_ANCHOR(anchor);
-  size = SIZE_FROM_ANCHOR(anchor);
-
-  if( size == 0 ) {
-    return 0;
-  }
-
-  value v = todo->tasks[head % todo->capacity];
-  uintnat head2 = (head+1) % todo->capacity;
-
-  if( !atomic_compare_exchange_strong((atomic_uintnat*)&todo->anchor, &anchor, ANCHOR_FROM(head2,size-1))) {
-    goto retry;
-  }
-
-  return v;
+  return todo->private_queue.tasks[--(todo->private_queue.size)];
 }
 
 struct oldify_state {
@@ -390,7 +457,7 @@ static void oldify_one (void* st_v, value v, value *p)
     if( try_update_object_header(v, p, result, infix_offset) ) {
       if (sz > 1){
         Op_val (result)[0] = field0;
-        put_todo(Caml_state->minor_todo_queue, v);
+        put_todo(Caml_state->minor_todo, v);
       } else {
         CAMLassert (sz == 1);
         p = Op_val(result);
@@ -501,7 +568,7 @@ static void oldify_mopup (struct oldify_state* st, int do_ephemerons)
   struct caml_ephe_ref_elt *re;
   int redo = 0;
 
-  while ((v = take_todo(Caml_state->minor_todo_queue)) != 0) {
+  while ((v = take_todo(Caml_state->minor_todo)) != 0) {
     /* I'm not convinced we can ever have something in todo_list that was updated
     by another domain, so this assert using get_header_val is probably not
     neccessary */
@@ -597,6 +664,8 @@ void caml_empty_minor_heap_domain_clear (struct domain* domain, void* unused)
   clear_table ((struct generic_table *)&minor_tables->custom);
 }
 
+void caml_do_opportunistic_major_slice(struct domain* domain, void* unused);
+
 /* Adapted from algorithm 13.23 from The GC Book */
 void oldify_steal(struct oldify_state* st, int participating_count, struct domain** participating) {
   struct domain* self = caml_domain_self();
@@ -605,20 +674,16 @@ void oldify_steal(struct oldify_state* st, int participating_count, struct domai
     for( int c = 0; c < participating_count ; c++ ) {
       struct domain* foreign_domain = participating[c];
       if( foreign_domain != self ) {
-        value v = steal_todo(foreign_domain->state->minor_todo_queue);
+        int stolen = steal_todo(self->state->minor_todo, foreign_domain->state->minor_todo);
 
-        if( v != 0 ) {
-          put_todo(self->state->minor_todo_queue, v);
+        if( stolen > 0 ) {
           break;
         }
       }
     }
 
-    while( size_todo(self->state->minor_todo_queue) > 0 ) 
-    {
-      oldify_mopup(st, 0);
-    }
-
+    oldify_mopup(st, 0);
+    
     if( atomic_fetch_add_explicit(&domains_idle, 1, memory_order_acq_rel) == participating_count ) {
       return;
     }
@@ -626,11 +691,12 @@ void oldify_steal(struct oldify_state* st, int participating_count, struct domai
     while( atomic_load_explicit(&domains_idle, memory_order_relaxed) < participating_count ) {
       for( int c = 0; c < participating_count ; c++ ) {
         struct domain* foreign_domain = participating[c];
-        if( size_todo(foreign_domain->state->minor_todo_queue) > 0 ) {
+        if( foreign_domain != self && size_todo(foreign_domain->state->minor_todo) > 0 ) {
           goto outer; /* work to steal */
         }
       }
 
+      caml_do_opportunistic_major_slice(self, 0);
       cpu_relax();
     }
   
@@ -656,7 +722,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   struct oldify_state st = {0};
   value **r;
 
-  init_todo(Caml_state->minor_todo_queue);
+  init_todo(Caml_state->minor_todo);
   st.promote_domain = domain;
 
   /* TODO: are there any optimizations we can make where we don't need to scan
@@ -790,13 +856,8 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   caml_ev_begin("minor_gc/steal");
   if( not_alone ) {
     oldify_steal (&st, participating_count, participating);
-
-    while( size_todo(Caml_state->minor_todo_queue) > 0 ) 
-    {
-      oldify_mopup(&st, 0);
-    }
   }
-  CAMLassert(size_todo(Caml_state->minor_todo_queue) == 0);
+  CAMLassert(Caml_state->minor_todo->private_queue.size == 0);
   caml_ev_end("minor_gc/steal");
 
   /* we reset these pointers before allowing any mutators to be
@@ -810,7 +871,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   }
 
   /* need to figure out when it is safe to do this */
-  /* empty_todo(&Caml_state->minor_todo_queue); */
+  /* empty_todo(&Caml_state->minor_todo); */
 
   domain_state->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
   domain_state->stat_minor_collections++;

@@ -257,8 +257,7 @@ static void create_domain(uintnat initial_minor_heap_wsize) {
     domain_state->young_start = domain_state->young_end =
       domain_state->young_ptr = 0;
     domain_state->minor_tables = caml_alloc_minor_tables();
-    domain_state->minor_todo_queue = caml_stat_alloc_noexc(sizeof(struct minor_todo_queue));
-    domain_state->minor_todo_queue->tasks = 0;
+    domain_state->minor_todo = caml_alloc_minor_todo();
     if(domain_state->minor_tables == NULL) {
       goto alloc_minor_tables_failure;
     }
@@ -304,7 +303,7 @@ init_major_gc_failure:
   caml_teardown_shared_heap(d->state.state->shared_heap);
 init_shared_heap_failure:
   caml_free_minor_tables(domain_state->minor_tables);
-  caml_stat_free(domain_state->minor_todo_queue);
+  caml_free_minor_todo(domain_state->minor_todo);
   domain_state->minor_tables = NULL;
 alloc_minor_tables_failure:
   caml_free_signal_stack();
