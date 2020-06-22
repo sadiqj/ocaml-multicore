@@ -158,34 +158,37 @@ static void empty_todo(struct minor_todo_queue* todo) {
 */
 
 /* THESE ONLY WORKS ON 64-BIT ARCHS */
-#define HEAD_FROM_ANCHOR(anchor) ((anchor)>>32) 
-#define SIZE_FROM_ANCHOR(anchor) ((anchor)&((1L << 32)-1L))
-#define ANCHOR_FROM(head,size) (((head) << 32) + (size))
+#define HEAD_FROM_ANCHOR(anchor) ((anchor)>>40) 
+#define SIZE_FROM_ANCHOR(anchor) (((anchor)>>16)&((1L << 24)-1L))
+#define TAG_FROM_ANCHOR(anchor) ((anchor)&((1L << 16)-1L))
+#define ANCHOR_FROM(head,size,tag) (((head) << 40) + ((size)<<16) + (tag))
 
 static uintnat size_todo(struct minor_todo_queue* todo) {
-  uintnat anchor = todo->anchor;
+  uintnat anchor = atomic_load_explicit(&todo->anchor, memory_order_relaxed);
   uintnat size = SIZE_FROM_ANCHOR(anchor); 
 
   return size;
 }
 
 static void put_todo(struct minor_todo_queue* todo, value v) {
-  uintnat anchor = todo->anchor;
+  uintnat anchor = atomic_load_explicit(&todo->anchor, memory_order_relaxed);
   uintnat head = HEAD_FROM_ANCHOR(anchor);
   uintnat size = SIZE_FROM_ANCHOR(anchor);
+  uintnat tag = TAG_FROM_ANCHOR(anchor);
 
   if( size == todo->capacity ) {
     abort(); // TODO
   }
 
   todo->tasks[(head+size) % todo->capacity] = v;
-  todo->anchor = ANCHOR_FROM(head,size+1);
+  atomic_store_explicit(&todo->anchor, ANCHOR_FROM(head,size+1,tag+1), memory_order_release);
 }
 
 static value take_todo(struct minor_todo_queue* todo) {
-  uintnat anchor = todo->anchor;
+  uintnat anchor = atomic_load_explicit(&todo->anchor, memory_order_relaxed);
   uintnat head = HEAD_FROM_ANCHOR(anchor);
   uintnat size = SIZE_FROM_ANCHOR(anchor);
+  uintnat tag = TAG_FROM_ANCHOR(anchor);
 
   if( size == 0 ) {
     return 0;
@@ -193,18 +196,19 @@ static value take_todo(struct minor_todo_queue* todo) {
 
   value v = todo->tasks[(head+size-1) % todo->capacity];
 
-  todo->anchor = ANCHOR_FROM(head,size-1);
+  atomic_store_explicit(&todo->anchor, ANCHOR_FROM(head,size-1,tag), memory_order_relaxed);
 
   return v;
 }
 
 static value steal_todo(struct minor_todo_queue* todo) {
-  uintnat anchor, head, size;
+  uintnat anchor, head, size, tag;
   
   retry:
-  anchor = todo->anchor;
+  anchor = atomic_load_explicit(&todo->anchor, memory_order_relaxed);
   head = HEAD_FROM_ANCHOR(anchor);
   size = SIZE_FROM_ANCHOR(anchor);
+  tag = TAG_FROM_ANCHOR(anchor);
 
   if( size == 0 ) {
     return 0;
@@ -213,7 +217,7 @@ static value steal_todo(struct minor_todo_queue* todo) {
   value v = todo->tasks[head % todo->capacity];
   uintnat head2 = (head+1) % todo->capacity;
 
-  if( !atomic_compare_exchange_strong((atomic_uintnat*)&todo->anchor, &anchor, ANCHOR_FROM(head2,size-1))) {
+  if( !atomic_compare_exchange_strong((atomic_uintnat*)&todo->anchor, &anchor, ANCHOR_FROM(head2,size-1,tag))) {
     goto retry;
   }
 

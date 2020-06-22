@@ -52,7 +52,7 @@ struct caml_minor_tables {
 };
 
 struct minor_todo_queue {
-  uintnat anchor; // (head,size)
+  atomic_uintnat anchor; // (head,size)
   value* tasks;
   uintnat capacity;
 };
