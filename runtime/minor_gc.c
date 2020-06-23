@@ -161,7 +161,7 @@ static void empty_todo(struct minor_todo_queue* todo) {
 #define HEAD_FROM_ANCHOR(anchor) ((anchor)>>40) 
 #define SIZE_FROM_ANCHOR(anchor) (((anchor)>>16)&((1L << 24)-1L))
 #define TAG_FROM_ANCHOR(anchor) ((anchor)&((1L << 16)-1L))
-#define ANCHOR_FROM(head,size,tag) (((head) << 40) + ((size)<<16) + (tag))
+#define ANCHOR_FROM(head,size,tag) (((head) << 40) + ((size)<<16) + ((tag&((1L << 16)-1L))))
 
 static uintnat size_todo(struct minor_todo_queue* todo) {
   uintnat anchor = atomic_load_explicit(&todo->anchor, memory_order_relaxed);
@@ -181,6 +181,7 @@ static void put_todo(struct minor_todo_queue* todo, value v) {
   }
 
   todo->tasks[(head+size) % todo->capacity] = v;
+
   atomic_store_explicit(&todo->anchor, ANCHOR_FROM(head,size+1,tag+1), memory_order_release);
 }
 
@@ -195,6 +196,12 @@ static value take_todo(struct minor_todo_queue* todo) {
   }
 
   value v = todo->tasks[(head+size-1) % todo->capacity];
+  
+  CAMLassert(v != 0);
+
+  #ifdef DEBUG
+  todo->tasks[(head+size-1) % todo->capacity] = 0;
+  #endif
 
   atomic_store_explicit(&todo->anchor, ANCHOR_FROM(head,size-1,tag), memory_order_relaxed);
 
@@ -215,6 +222,13 @@ static value steal_todo(struct minor_todo_queue* todo) {
   }
 
   value v = todo->tasks[head % todo->capacity];
+  
+  CAMLassert(v != 0);
+
+  #if DEBUG
+  todo->tasks[head & todo->capacity] = 0;
+  #endif
+
   uintnat head2 = (head+1) % todo->capacity;
 
   if( !atomic_compare_exchange_strong((atomic_uintnat*)&todo->anchor, &anchor, ANCHOR_FROM(head2,size-1,tag))) {
