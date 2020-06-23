@@ -161,7 +161,8 @@ static void empty_todo(struct minor_todo_queue* todo) {
 #define HEAD_FROM_ANCHOR(anchor) ((anchor)>>40) 
 #define SIZE_FROM_ANCHOR(anchor) (((anchor)>>16)&((1L << 24)-1L))
 #define TAG_FROM_ANCHOR(anchor) ((anchor)&((1L << 16)-1L))
-#define ANCHOR_FROM(head,size,tag) (((head) << 40) + ((size)<<16) + ((tag&((1L << 16)-1L))))
+#define ANCHOR_FROM(head,size,tag) (((head) << 40) + ((size)<<16) + (((tag)&((1L << 16)-1L))))
+#define MIN_STEAL_SIZE 9
 
 static uintnat size_todo(struct minor_todo_queue* todo) {
   uintnat anchor = atomic_load_explicit(&todo->anchor, memory_order_relaxed);
@@ -197,12 +198,6 @@ static value take_todo(struct minor_todo_queue* todo) {
 
   value v = todo->tasks[(head+size-1) % todo->capacity];
   
-  CAMLassert(v != 0);
-
-  #ifdef DEBUG
-  todo->tasks[(head+size-1) % todo->capacity] = 0;
-  #endif
-
   atomic_store_explicit(&todo->anchor, ANCHOR_FROM(head,size-1,tag), memory_order_relaxed);
 
   return v;
@@ -217,17 +212,11 @@ static value steal_todo(struct minor_todo_queue* todo) {
   size = SIZE_FROM_ANCHOR(anchor);
   tag = TAG_FROM_ANCHOR(anchor);
 
-  if( size == 0 ) {
+  if( size < MIN_STEAL_SIZE ) {
     return 0;
   }
 
   value v = todo->tasks[head % todo->capacity];
-  
-  CAMLassert(v != 0);
-
-  #if DEBUG
-  todo->tasks[head & todo->capacity] = 0;
-  #endif
 
   uintnat head2 = (head+1) % todo->capacity;
 
@@ -647,7 +636,7 @@ void oldify_steal(struct oldify_state* st, int participating_count, struct domai
     while( atomic_load_explicit(&domains_idle, memory_order_relaxed) < participating_count ) {
       for( int c = 0; c < participating_count ; c++ ) {
         struct domain* foreign_domain = participating[c];
-        if( size_todo(foreign_domain->state->minor_todo_queue) > 0 ) {
+        if( foreign_domain != self && size_todo(foreign_domain->state->minor_todo_queue) > 0 ) {
           goto outer; /* work to steal */
         }
       }
