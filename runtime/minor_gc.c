@@ -665,6 +665,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   uintnat minor_allocated_bytes = young_end - young_ptr;
   struct oldify_state st = {0};
   value **r;
+  int curr_idx, c;
 
   init_todo(Caml_state->minor_todo_queue);
   st.promote_domain = domain;
@@ -679,10 +680,58 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
 
   int remembered_roots = 0;
 
-  for( r = self_minor_tables->major_ref.base ; r < self_minor_tables->major_ref.ptr ; r++ )
+  if( not_alone ) {
+    int participating_idx = -1;
+    struct domain* domain_self = caml_domain_self();
+
+    for( int i = 0; i < participating_count ; i++ ) {
+      if( participating[i] == domain_self ) {
+        participating_idx = i;
+        break;
+      }
+    }
+
+    CAMLassert(participating_idx != -1);
+
+    struct domain* foreign_domain;
+    // We use this rather odd scheme because it better smoothes the remainder
+    for( curr_idx = 0, c = participating_idx; curr_idx < participating_count; curr_idx++) {
+      foreign_domain = participating[c];
+      struct caml_minor_tables* foreign_minor_tables = foreign_domain->state->minor_tables;
+      struct caml_ref_table* foreign_major_ref = &foreign_minor_tables->major_ref;
+      // calculate the size of the remembered set
+      intnat major_ref_size = foreign_major_ref->ptr - foreign_major_ref->base;
+      // number of remembered set entries each domain takes here
+      intnat refs_per_domain = (major_ref_size / participating_count);
+      // where to start in the remembered set
+      value** ref_start = foreign_major_ref->base + (curr_idx * refs_per_domain);
+      // where to end in the remembered set
+      value** ref_end = foreign_major_ref->base + ((curr_idx+1) * refs_per_domain);
+      // if we're the last domain this time, cover all the remaining refs
+      if( curr_idx == participating_count-1 ) {
+        caml_gc_log("taking remainder");
+        ref_end = foreign_major_ref->ptr;
+      }
+
+      caml_gc_log("idx: %d, foreign_domain: %d, ref_size: %"ARCH_INTNAT_PRINTF_FORMAT"d, refs_per_domain: %"ARCH_INTNAT_PRINTF_FORMAT"d, ref_base: %p, ref_ptr: %p, ref_start: %p, ref_end: %p",
+        participating_idx, foreign_domain->state->id, major_ref_size, refs_per_domain, foreign_major_ref->base, foreign_major_ref->ptr, ref_start, ref_end);
+
+      for( r = ref_start ; r < foreign_major_ref->ptr && r < ref_end ; r++ )
+      {
+        oldify_one (&st, **r, *r);
+        remembered_roots++;
+      }
+
+      c = (c+1) % participating_count;
+    }
+  }
+  else
   {
-    oldify_one (&st, **r, *r);
-    remembered_roots++;
+    for( r = self_minor_tables->major_ref.base ; r < self_minor_tables->major_ref.ptr ; r++ )
+    {
+      oldify_one (&st, **r, *r);
+      remembered_roots++;
+    }
   }
 
   #ifdef DEBUG
