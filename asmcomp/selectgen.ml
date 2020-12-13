@@ -1221,7 +1221,7 @@ method insert_prologue _f ~loc_arg ~rarg ~spacetime_node_hole:_ ~env =
 
 method initial_env () = env_empty
 
-method emit_fundecl f =
+method emit_fundecl ~future_funcnames f =
   current_function_name := f.Cmm.fun_name;
   let rargs =
     List.map
@@ -1252,6 +1252,8 @@ method emit_fundecl f =
   let fun_spacetime_shape =
     self#insert_prologue f ~loc_arg ~rarg ~spacetime_node_hole ~env
   in
+  if Polling.requires_prologue_poll ~future_funcnames body then
+    self#insert env (Iop Ipoll) [||] [||];  
   let body = self#extract_core ~end_instr:body in
   instr_iter (fun instr -> self#mark_instr instr.Mach.desc) body;
   { fun_name = f.Cmm.fun_name;

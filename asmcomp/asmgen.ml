@@ -73,7 +73,7 @@ let compile_fundecl ~ppf_dump ~funcnames fd_cmm =
   Proc.init ();
   Reg.reset();
   fd_cmm
-  ++ Profile.record ~accumulate:true "selection" Selection.fundecl
+  ++ Profile.record ~accumulate:true "selection" (Selection.fundecl ~future_funcnames:funcnames)
   ++ pass_dump_if ppf_dump dump_selection "After instruction selection"
   ++ Profile.record ~accumulate:true "comballoc" Comballoc.fundecl
   ++ pass_dump_if ppf_dump dump_combine "After allocation combining"

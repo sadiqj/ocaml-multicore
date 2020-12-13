@@ -451,13 +451,13 @@ class virtual instruction_selection = object (self)
     else
       env
 
-  method! emit_fundecl f =
+  method! emit_fundecl ~future_funcnames f =
     if Config.spacetime then begin
       disable_instrumentation <- false;
       let node = V.create_local "spacetime_node" in
       reset ~spacetime_node_ident:node ~function_label:f.Cmm.fun_name
     end;
-    super#emit_fundecl f
+    super#emit_fundecl ~future_funcnames f
 
   method! insert_prologue f ~loc_arg ~rarg ~spacetime_node_hole ~env =
     let fun_spacetime_shape =
