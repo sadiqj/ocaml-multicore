@@ -139,7 +139,7 @@ void caml_sample_heap_stats(struct caml_heap_state* local, struct heap_stats* h)
 
 /* Allocating and deallocating pools from the global freelist. */
 
-#define POOLS_PER_ALLOCATION 16
+#define POOLS_PER_ALLOCATION 8
 static pool* pool_acquire(struct caml_heap_state* local) {
   pool* r;
 
