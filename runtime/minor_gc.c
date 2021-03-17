@@ -131,7 +131,7 @@ void caml_set_minor_heap_size (asize_t wsize)
   struct caml_minor_tables *r = domain_state->minor_tables;
   if (domain_state->young_ptr != domain_state->young_end) caml_minor_collection ();
 
-  if(caml_reallocate_minor_heap(wsize) < 0) {
+  if(caml_replenish_minor_heap(wsize) < 0) {
     caml_fatal_error("Fatal error: No memory for minor heap");
   }
 
@@ -510,20 +510,12 @@ void caml_empty_minor_heap_domain_clear (struct domain* domain, void* unused)
 {
   caml_domain_state* domain_state = domain->state;
   struct caml_minor_tables *minor_tables = domain_state->minor_tables;
-  int realloc_retcode;
 
   caml_final_empty_young(domain);
 
   clear_table ((struct generic_table *)&minor_tables->major_ref);
   clear_table ((struct generic_table *)&minor_tables->ephe_ref);
   clear_table ((struct generic_table *)&minor_tables->custom);
-
-  realloc_retcode = caml_reallocate_minor_heap(caml_params->init_minor_heap_wsz);
-
-  if (realloc_retcode == REALLOCATE_HEAP_FULL)
-    abort(); /* FIXME(engil): should not happen? */
-  else if (realloc_retcode == REALLOCATE_OOM)
-    caml_fatal_error("could not allocate minor heap");
 
   return;
 }
@@ -551,15 +543,6 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
 
   caml_gc_log ("Minor collection of domain %d starting", domain->state->id);
   caml_ev_begin("minor_gc");
-
-  #ifdef DEBUG
-    /* forcibly reset minor_heaps_ptr to a bogus value to check that nothing
-       interacts with it during a minor cycle */
-    if (atomic_load_explicit(&caml_global_minor_heap_ptr, memory_order_acquire)) {
-      caml_gc_log("setting caml_global_minor_heap_ptr to NULL");
-      atomic_store_explicit(&caml_global_minor_heap_ptr, 0x0, memory_order_release);
-    }
-  #endif
 
   if( participating[0] == caml_domain_self() || !not_alone ) { // TODO: We should distribute this work
     if(domain_finished_root == 0){
@@ -633,13 +616,13 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   }
 
   #ifdef DEBUG
-    caml_global_barrier();
+    /*caml_global_barrier();
     // At this point all domains should have gone through all remembered set entries
     // We need to verify that all our remembered set entries are now in the major heap or promoted
     for( r = self_minor_tables->major_ref.base ; r < self_minor_tables->major_ref.ptr ; r++ ) {
       // Everything should be promoted
       CAMLassert(!(Is_block(**r)) || !(Is_young(**r)));
-    }
+    }*/
   #endif
 
   /* promote the finalizers unconditionally as we want to allow early release */
@@ -695,31 +678,33 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
   /* we reset these pointers before allowing any mutators to be
      released to avoid races where another domain signals an interrupt
      and we clobber it */
-  atomic_store_rel((atomic_uintnat*)&domain_state->young_limit, (uintnat)domain_state->young_start);
-  atomic_store_rel((atomic_uintnat*)&domain_state->young_ptr, (uintnat)domain_state->young_end);
+  /*atomic_store_rel((atomic_uintnat*)&domain_state->young_limit, (uintnat)domain_state->young_start);
+  atomic_store_rel((atomic_uintnat*)&domain_state->young_ptr, (uintnat)domain_state->young_end);*/
 
-  if( !not_alone ) {
-    atomic_store_explicit(&caml_global_minor_heap_ptr,
-			  caml_minor_heaps_base,
-			  memory_order_release);
-  }
-  else {
-    while (1) {
-      finished_minor_gc = atomic_load_explicit(&domains_finished_minor_gc, memory_order_acquire);
-      if ((finished_minor_gc + 1) == participating_count) {
-	/* last domain to be done with minor collection, reset allocation ptr */
-	caml_gc_log("setting caml_global_minor_heap_ptr to caml_minor_heaps_base");
-	atomic_store_explicit(&caml_global_minor_heap_ptr,
-			      caml_minor_heaps_base,
-			      memory_order_release);
-      }
-      /* CAS away finished_minor_gc, only one domain should be the last one. */
-      if (atomic_compare_exchange_strong(&domains_finished_minor_gc,
+  if( not_alone ) {
+      while (1) {
+        finished_minor_gc = atomic_load_explicit(&domains_finished_minor_gc, memory_order_acquire);
+        if ((finished_minor_gc + 1) == participating_count) {
+          /* last domain to be done with minor collection, reset global allocation pointer */
+          caml_gc_log("setting caml_global_minor_heap_ptr to caml_minor_heaps_base");
+          atomic_store_explicit(&caml_global_minor_heap_ptr,
+                    caml_global_minor_heap_start,
+                    memory_order_release);
+        }
+
+        /* CAS away finished_minor_gc, only one domain should be the last one. */
+        if (atomic_compare_exchange_strong(&domains_finished_minor_gc,
 					 &finished_minor_gc,
 					 finished_minor_gc + 1)) {
-	break;
-      }
+        	break;
+        }
     }
+  }
+  else {
+    // Only one domain running, it's safe to just set this directly
+    atomic_store_explicit(&caml_global_minor_heap_ptr,
+			  caml_global_minor_heap_start,
+			  memory_order_release);
   }
 
   domain_state->stat_minor_words += Wsize_bsize (minor_allocated_bytes);
@@ -794,6 +779,11 @@ static void caml_stw_empty_minor_heap_no_major_slice (struct domain* domain, voi
   caml_gc_log("running stw empty_minor_heap_domain_clear");
   caml_empty_minor_heap_domain_clear(domain, 0);
   caml_ev_end("minor_gc/clear");
+
+  caml_ev_begin("minor_gc/replenish");
+  caml_replenish_minor_heap(caml_params->init_minor_heap_wsz);
+  caml_ev_end("minor_gc/replenish");
+
   caml_gc_log("finished stw empty_minor_heap");
 }
 

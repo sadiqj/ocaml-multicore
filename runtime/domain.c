@@ -99,8 +99,6 @@ struct dom_internal {
   /* readonly */
   uintnat tls_area;
   uintnat tls_area_end;
-  uintnat minor_heap_area;
-  uintnat minor_heap_area_end;
 };
 typedef struct dom_internal dom_internal;
 
@@ -113,8 +111,8 @@ static struct dom_internal all_domains[Max_domains];
 
 CAMLexport atomic_uintnat caml_num_domains_running;
 
-CAMLexport uintnat caml_minor_heaps_base;
-CAMLexport uintnat caml_minor_heaps_end;
+CAMLexport uintnat caml_global_minor_heap_start;
+CAMLexport uintnat caml_global_minor_heap_end;
 CAMLexport atomic_uintnat caml_global_minor_heap_ptr;
 
 CAMLexport uintnat caml_tls_areas_base;
@@ -132,6 +130,8 @@ struct interrupt {
   /* accessed only when target's lock held */
   struct interrupt* next;
 };
+
+static const uintnat INTERRUPT_MAGIC = (uintnat)(-1);
 
 #ifdef __APPLE__
 /* OSX has issues with dynamic loading + exported TLS.
@@ -168,66 +168,64 @@ asize_t caml_norm_minor_heap_size (intnat wsize)
   return Wsize_bsize(bs);
 }
 
-int caml_reallocate_minor_heap(asize_t wsize)
+int caml_replenish_minor_heap(asize_t minor_heap_wsize)
 {
   caml_domain_state* domain_state = Caml_state;
-  uintnat global_minor_heap_ptr;
+  uintnat cached_global_minor_heap_ptr;
   uintnat new_alloc_ptr;
+  uintnat young_limit;
 
-  caml_ev_begin("reallocate");
+  caml_ev_begin("replenish");
 
+  // Here we try to replenish our minor heap from the global minor heap
+  // This needs to be done in a loop because it could fail.
   while (1) {
+    cached_global_minor_heap_ptr = atomic_load_explicit(&caml_global_minor_heap_ptr, memory_order_acquire);
 
-    global_minor_heap_ptr = atomic_load_explicit(&caml_global_minor_heap_ptr, memory_order_acquire);
+    CAMLassert(caml_global_minor_heap_start <= cached_global_minor_heap_ptr);
+    CAMLassert(cached_global_minor_heap_ptr <= caml_global_minor_heap_end);
 
-    CAMLassert(caml_minor_heaps_base <= global_minor_heap_ptr);
-    CAMLassert(global_minor_heap_ptr <= caml_minor_heaps_end);
+    new_alloc_ptr = cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsize);
 
-    new_alloc_ptr = global_minor_heap_ptr + Bsize_wsize(wsize);
-
-    if (new_alloc_ptr > caml_minor_heaps_end)
-      return REALLOCATE_HEAP_FULL;
+    if (new_alloc_ptr > caml_global_minor_heap_end)
+      return 0;
 
     /* CAS away and bump the allocation pointer: if it fails a domain likely
-       snatched the requested segment. Restart the loop, else break. */
+       snatched the requested segment. Restart the loop, else success. */
     if(atomic_compare_exchange_strong(&caml_global_minor_heap_ptr,
-				      &global_minor_heap_ptr,
+				      &cached_global_minor_heap_ptr,
 				      new_alloc_ptr)) {
       break;
     };
 
+    return 1;
   }
 
-  /* free old minor heap.
-     instead of unmapping the heap, we decommit it, so there's
-     no race whereby other code could attempt to reuse the memory. */
-  caml_mem_decommit((void*)domain_self->minor_heap_area,
-                    domain_self->minor_heap_area_end - domain_self->minor_heap_area);
+  // global_minor_heap_ptr is now our new minor heap for this domain
 
-  /* new minor heap area is the previous (pre-CAS) global_minor_heap_ptr */
-  domain_self->minor_heap_area = global_minor_heap_ptr;
+  minor_heap_wsize = caml_norm_minor_heap_size(minor_heap_wsize);
 
-  wsize = caml_norm_minor_heap_size(wsize);
+  domain_state->minor_heap_wsz = minor_heap_wsize;
 
-  if (!caml_mem_commit((void*)domain_self->minor_heap_area, Bsize_wsize(wsize))) {
-    return REALLOCATE_OOM;
+  young_limit = atomic_load_acq((atomic_uintnat*)&domain_state->young_limit);
+  if( young_limit != INTERRUPT_MAGIC ) {
+    atomic_compare_exchange_strong((atomic_uintnat*)&domain_state->young_limit, &young_limit, (atomic_uintnat)cached_global_minor_heap_ptr);
   }
+
+  domain_state->young_start = (char*)cached_global_minor_heap_ptr;
+  domain_state->young_end = (char*)(cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsize));
+
+  domain_state->young_ptr = domain_state->young_end;
 
 #ifdef DEBUG
   {
-    uintnat* p = (uintnat*)domain_self->minor_heap_area;
-    for (; p < (uintnat*)(domain_self->minor_heap_area + Bsize_wsize(wsize)); p++)
+    uintnat* p = (uintnat*)domain_state->young_start;
+    for (; p < (uintnat*)(domain_state->young_end + Bsize_wsize(minor_heap_wsize)); p++)
       *p = Debug_uninit_align;
   }
 #endif
 
-  domain_state->minor_heap_wsz = wsize;
-
-  domain_state->young_start = (char*)domain_self->minor_heap_area;
-  domain_state->young_end = (char*)(domain_self->minor_heap_area + Bsize_wsize(wsize));
-  domain_state->young_limit = (uintnat) domain_state->young_start;
-  domain_state->young_ptr = domain_state->young_end;
-  caml_ev_end("reallocate");
+  caml_ev_end("replenish");
   return 0;
 }
 
@@ -304,10 +302,10 @@ static void create_domain(uintnat initial_minor_heap_wsize) {
 
     /* setting young_limit and young_ptr to minor_heaps_base
        to trigger minor_heaps reallocation on GC poll */
-    domain_state->young_start = (char*)caml_minor_heaps_base;
-    domain_state->young_end = (char*)caml_minor_heaps_base;
-    domain_state->young_limit = (uintnat) caml_minor_heaps_base;
-    domain_state->young_ptr = (char *) caml_minor_heaps_base;
+    domain_state->young_start = (char*)caml_global_minor_heap_start;
+    domain_state->young_end = (char*)caml_global_minor_heap_start;
+    domain_state->young_limit = (uintnat) caml_global_minor_heap_start;
+    domain_state->young_ptr = (char *) caml_global_minor_heap_start;
 
     domain_state->dls_root = caml_create_root_noexc(Val_unit);
     if(domain_state->dls_root == NULL) {
@@ -381,12 +379,12 @@ void caml_init_domains(uintnat minor_heap_wsz) {
   tls_size = caml_mem_round_up_pages(sizeof(caml_domain_state));
   tls_areas_size = tls_size * Max_domains;
 
-  heaps_base = caml_mem_map(size, size, 1 /* reserve_only */);
+  heaps_base = caml_mem_map(size, size, 0 /* commit */);
   tls_base = caml_mem_map(tls_areas_size, tls_areas_size, 1 /* reserve_only */);
   if (!heaps_base || !tls_base) caml_raise_out_of_memory();
 
-  caml_minor_heaps_base = (uintnat) heaps_base;
-  caml_minor_heaps_end = (uintnat) heaps_base + size;
+  caml_global_minor_heap_start = (uintnat) heaps_base;
+  caml_global_minor_heap_end = (uintnat) heaps_base + size;
   caml_global_minor_heap_ptr = (uintnat) heaps_base;
   caml_tls_areas_base = (uintnat) tls_base;
 
@@ -411,8 +409,6 @@ void caml_init_domains(uintnat minor_heap_wsz) {
     domain_tls_base = caml_tls_areas_base + tls_size * (uintnat)i;
     dom->tls_area = domain_tls_base;
     dom->tls_area_end = domain_tls_base + tls_size;
-    dom->minor_heap_area = 0;
-    dom->minor_heap_area_end = 0;
   }
 
 
@@ -628,7 +624,7 @@ struct domain* caml_domain_self()
 
 struct domain* caml_owner_of_young_block(value v) {
   Assert(Is_young(v));
-  int heap_id = ((uintnat)v - caml_minor_heaps_base) /
+  int heap_id = ((uintnat)v - caml_global_minor_heap_start) /
     Minor_heap_max;
   return &all_domains[heap_id].state;
 }
@@ -642,8 +638,6 @@ CAMLprim value caml_ml_domain_id(value unit)
 {
   return Val_int(domain_self->interruptor.unique_id);
 }
-
-static const uintnat INTERRUPT_MAGIC = (uintnat)(-1);
 
 static void interrupt_domain(dom_internal* d) {
   atomic_store_rel(d->interrupt_word_address, INTERRUPT_MAGIC);
@@ -933,37 +927,28 @@ static void caml_poll_gc_work()
 {
   CAMLalloc_point_here;
 
-  if (((uintnat)Caml_state->young_ptr - Bhsize_wosize(Max_young_wosize) <
-       (uintnat)Caml_state->young_start) ||
-      Caml_state->requested_minor_gc) {
+  int domain_minor_heap_full = ((uintnat)Caml_state->young_ptr - Bhsize_wosize(Max_young_wosize) <
+       (uintnat)Caml_state->young_start);
 
-    /* not a requested_minor_gc, so minor_heap ran out, but can fetch more from
-       the global minor heap segment. */
-    /* TODO(engil): rework logic, double checking requested_minor_gc is odd */
-    if (!Caml_state->requested_minor_gc &&
-	(atomic_load_explicit(&caml_global_minor_heap_ptr, memory_order_acquire)
-	 < caml_minor_heaps_end)) {
+  int need_minor_gc = Caml_state->requested_minor_gc;
 
-      switch (caml_reallocate_minor_heap(caml_params->init_minor_heap_wsz)) {
+  // Check if our minor heap is full. If it is then we need to try to grab a
+  // new one from the global minor heap.
+  /*if( minor_heap_full && !need_minor_gc ) {
+    uintnat global_ptr =
+      atomic_load_explicit(&caml_global_minor_heap_ptr, memory_order_acquire);
 
-      /* if reallocation didn't work, we keep executing this branch and proceed
-	 with a minor collection */
-      case REALLOCATE_HEAP_FULL:
-	break;
-
-      case REALLOCATE_OOM:
-	caml_fatal_error("could not allocate minor heap");
-	break;
-
-      /* TODO(engil): same as earlier, rework, because in case we did reallocate
-	 we skip the requested_major_slice branch this time around. */
-      default:
-	return;
-
-      };
-
+    // Check if there's space left in the global minor heap
+    if( global_ptr < caml_global_minor_heap_end ) {
+      // There is space, let's try to get a new minor heap
+      if(!caml_replenish_minor_heap(caml_params->init_minor_heap_wsz)) {
+          // Failed to replenish our minor heap
+          need_minor_gc = 1;
+      }
     }
+  }*/
 
+  if ( domain_minor_heap_full || need_minor_gc ) {
     /* out of minor heap or collection forced */
     caml_ev_begin("dispatch_minor_gc");
     Caml_state->requested_minor_gc = 0;

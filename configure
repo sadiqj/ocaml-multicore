@@ -4205,13 +4205,13 @@ if test "$ac_test_CFLAGS" = set; then
   CFLAGS=$ac_save_CFLAGS
 elif test $ac_cv_prog_cc_g = yes; then
   if test "$GCC" = yes; then
-    CFLAGS="-g -O2"
+    CFLAGS="-g -O0"
   else
     CFLAGS="-g"
   fi
 else
   if test "$GCC" = yes; then
-    CFLAGS="-O2"
+    CFLAGS="-O0"
   else
     CFLAGS=
   fi
@@ -12503,7 +12503,7 @@ esac
 # - strict type-based aliasing analysis (too risky for the OCaml runtime)
 # - strict no-overflow conditions on signed integer arithmetic
 #   (the OCaml runtime assumes Java-style behavior of signed integer arith.)
-# Concerning optimization level, -O3 is somewhat risky, so take -O2.
+# Concerning optimization level, -O3 is somewhat risky, so take -O0.
 # Concerning language version, gnu99 is ISO C99 plus GNU extensions
 # that are often used in standard headers.  Older GCC versions
 # defaults to gnu89, which is not C99.  Clang defaults to gnu99 or
@@ -12525,7 +12525,7 @@ case $host in #(
   *) :
     case $ocaml_cv_cc_vendor in #(
   clang-*) :
-    common_cflags="-O2 -fno-strict-aliasing -fwrapv";
+    common_cflags="-O0 -fno-strict-aliasing -fwrapv";
       internal_cflags="$cc_warnings -fno-common" ;; #(
   gcc-012-*) :
     # Some versions known to miscompile OCaml, e,g, 2.7.2.1, some 2.96.
@@ -12544,14 +12544,14 @@ $as_echo "$as_me: WARNING: Consider using GCC version 4.2 or above." >&2;};
       common_cflags="-std=gnu99 -O";
       internal_cflags="$cc_warnings" ;; #(
   gcc-4-*) :
-    common_cflags="-std=gnu99 -O2 -fno-strict-aliasing -fwrapv \
+    common_cflags="-std=gnu99 -O0 -fno-strict-aliasing -fwrapv \
 -fno-builtin-memcmp";
       internal_cflags="$cc_warnings" ;; #(
   gcc-*) :
-    common_cflags="-O2 -fno-strict-aliasing -fwrapv";
+    common_cflags="-O0 -fno-strict-aliasing -fwrapv";
       internal_cflags="$cc_warnings -fno-common" ;; #(
   msvc-*) :
-    common_cflags="-nologo -O2 -Gy- -MD $cc_warnings"
+    common_cflags="-nologo -O0 -Gy- -MD $cc_warnings"
       common_cppflags="-D_CRT_SECURE_NO_DEPRECATE"
       internal_cppflags='-DUNICODE -D_UNICODE'
       internal_cppflags="$internal_cppflags -DWINDOWS_UNICODE="
@@ -16859,47 +16859,6 @@ ocamlc_cppflags="$common_cppflags"
 ocamlopt_cflags="$common_cflags"
 ocamlopt_cppflags="$common_cppflags"
 cclibs="$cclibs $mathlib"
-
-{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for backtrace in -lexecinfo" >&5
-$as_echo_n "checking for backtrace in -lexecinfo... " >&6; }
-if ${ac_cv_lib_execinfo_backtrace+:} false; then :
-  $as_echo_n "(cached) " >&6
-else
-  ac_check_lib_save_LIBS=$LIBS
-LIBS="-lexecinfo  $LIBS"
-cat confdefs.h - <<_ACEOF >conftest.$ac_ext
-/* end confdefs.h.  */
-
-/* Override any GCC internal prototype to avoid an error.
-   Use char because int might match the return type of a GCC
-   builtin and then its argument prototype would still apply.  */
-#ifdef __cplusplus
-extern "C"
-#endif
-char backtrace ();
-int
-main ()
-{
-return backtrace ();
-  ;
-  return 0;
-}
-_ACEOF
-if ac_fn_c_try_link "$LINENO"; then :
-  ac_cv_lib_execinfo_backtrace=yes
-else
-  ac_cv_lib_execinfo_backtrace=no
-fi
-rm -f core conftest.err conftest.$ac_objext \
-    conftest$ac_exeext conftest.$ac_ext
-LIBS=$ac_check_lib_save_LIBS
-fi
-{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_execinfo_backtrace" >&5
-$as_echo "$ac_cv_lib_execinfo_backtrace" >&6; }
-if test "x$ac_cv_lib_execinfo_backtrace" = xyes; then :
-  cclibs="$cclibs -lexecinfo"
-fi
-]
 
 case $host in #(
   *-*-mingw32) :
