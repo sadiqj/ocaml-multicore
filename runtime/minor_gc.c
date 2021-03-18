@@ -47,6 +47,8 @@ struct generic_table CAML_TABLE_STRUCT(char);
 static atomic_intnat domains_finished_minor_gc;
 static atomic_intnat domain_finished_root;
 
+asize_t minor_heap_wsz;
+
 static atomic_uintnat caml_minor_cycles_started = 0;
 
 static caml_plat_mutex global_roots_lock = CAML_PLAT_MUTEX_INITIALIZER;
@@ -127,11 +129,13 @@ extern int caml_debug_is_major(value val) {
 
 void caml_set_minor_heap_size (asize_t wsize)
 {
+  minor_heap_wsz = wsize;
+
   caml_domain_state* domain_state = Caml_state;
   struct caml_minor_tables *r = domain_state->minor_tables;
   if (domain_state->young_ptr != domain_state->young_end) caml_minor_collection ();
 
-  if(caml_replenish_minor_heap(wsize) < 0) {
+  if(caml_replenish_minor_heap() < 0) {
     caml_fatal_error("Fatal error: No memory for minor heap");
   }
 
@@ -793,7 +797,7 @@ static void caml_stw_empty_minor_heap_no_major_slice (struct domain* domain, voi
   caml_ev_end("minor_gc/clear");
 
   caml_ev_begin("minor_gc/replenish");
-  caml_replenish_minor_heap(caml_params->init_minor_heap_wsz);
+  caml_replenish_minor_heap();
   caml_ev_end("minor_gc/replenish");
 
   caml_gc_log("finished stw empty_minor_heap");

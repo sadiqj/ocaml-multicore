@@ -43,7 +43,7 @@ struct domain {
 #define REALLOCATE_HEAP_FULL -2
 
 asize_t caml_norm_minor_heap_size (intnat);
-int caml_replenish_minor_heap(asize_t);
+int caml_replenish_minor_heap();
 
 int caml_incoming_interrupts_queued(void);
 

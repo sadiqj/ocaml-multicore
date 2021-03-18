@@ -169,7 +169,7 @@ asize_t caml_norm_minor_heap_size (intnat wsize)
   return Wsize_bsize(bs);
 }
 
-int caml_replenish_minor_heap(asize_t minor_heap_wsize)
+int caml_replenish_minor_heap()
 {
   caml_domain_state* domain_state = Caml_state;
   uintnat cached_global_minor_heap_ptr;
@@ -186,7 +186,7 @@ int caml_replenish_minor_heap(asize_t minor_heap_wsize)
     CAMLassert(caml_global_minor_heap_start <= cached_global_minor_heap_ptr);
     CAMLassert(cached_global_minor_heap_ptr <= caml_global_minor_heap_limit);
 
-    new_alloc_ptr = cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsize);
+    new_alloc_ptr = cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsz);
 
     if (new_alloc_ptr > caml_global_minor_heap_limit) {
       caml_ev_end("replenish");
@@ -204,9 +204,7 @@ int caml_replenish_minor_heap(asize_t minor_heap_wsize)
 
   // global_minor_heap_ptr is now our new minor heap for this domain
 
-  minor_heap_wsize = caml_norm_minor_heap_size(minor_heap_wsize);
-
-  domain_state->minor_heap_wsz = minor_heap_wsize;
+  domain_state->minor_heap_wsz = caml_norm_minor_heap_size(minor_heap_wsz);
 
   young_limit = atomic_load_acq((atomic_uintnat*)&domain_state->young_limit);
   if( young_limit != INTERRUPT_MAGIC ) {
@@ -214,7 +212,7 @@ int caml_replenish_minor_heap(asize_t minor_heap_wsize)
   }
 
   domain_state->young_start = (char*)cached_global_minor_heap_ptr;
-  domain_state->young_end = (char*)(cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsize));
+  domain_state->young_end = (char*)(cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsz));
 
   domain_state->young_ptr = domain_state->young_end;
 
@@ -379,7 +377,7 @@ CAMLexport void caml_reset_domain_lock(void)
   return;
 }
 
-void caml_init_domains(uintnat minor_heap_wsz) {
+void caml_init_domains(uintnat init_minor_heap_wsz) {
   int i;
   uintnat size;
   uintnat tls_size;
@@ -400,6 +398,8 @@ void caml_init_domains(uintnat minor_heap_wsz) {
 
   tls_base = caml_mem_map(tls_areas_size, tls_areas_size, 1 /* reserve_only */);
   if (!heaps_base || !tls_base) caml_raise_out_of_memory();
+
+  minor_heap_wsz = init_minor_heap_wsz;
 
   // We should commit some space for at least one domain though
   if( !caml_mem_commit(heaps_base, Bsize_wsize(minor_heap_wsz)) ) {
@@ -970,7 +970,7 @@ static void caml_poll_gc_work()
     else
     {
       // There is space, let's try to get a new minor heap
-      if(!caml_replenish_minor_heap(caml_params->init_minor_heap_wsz)) {
+      if(!caml_replenish_minor_heap()) {
           // Failed to replenish our minor heap
           need_minor_gc = 1;
       }
