@@ -112,6 +112,7 @@ struct domain* caml_domain_of_id(int);
 CAMLextern atomic_uintnat caml_num_domains_running;
 CAMLextern uintnat caml_global_minor_heap_start;
 CAMLextern uintnat caml_global_minor_heap_end;
+CAMLextern uintnat caml_global_minor_heap_limit;
 CAMLextern atomic_uintnat caml_global_minor_heap_ptr;
 
 INLINE intnat caml_domain_alone()

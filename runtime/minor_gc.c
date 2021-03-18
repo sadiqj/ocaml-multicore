@@ -520,6 +520,24 @@ void caml_empty_minor_heap_domain_clear (struct domain* domain, void* unused)
   return;
 }
 
+void caml_adjust_global_minor_heap(int participating_domains) {
+  // Calculate the size of the existing mapping
+  int global_minor_heap_size = caml_global_minor_heap_limit - caml_global_minor_heap_start;
+  // Now using the number of participating domains, we calculate the new size
+  int new_global_minor_heap_size = participating_domains*Bsize_wsize(caml_params->init_minor_heap_wsz) + caml_global_minor_heap_start;
+
+  if( global_minor_heap_size != new_global_minor_heap_size ) {
+    caml_mem_decommit((char*)caml_global_minor_heap_start, global_minor_heap_size);
+    caml_mem_commit((char*)caml_global_minor_heap_start, new_global_minor_heap_size);
+
+    caml_global_minor_heap_limit = caml_global_minor_heap_start + new_global_minor_heap_size;
+  }
+
+  atomic_store_explicit(&caml_global_minor_heap_ptr,
+            caml_global_minor_heap_start,
+            memory_order_release);
+}
+
 void caml_empty_minor_heap_promote (struct domain* domain, int participating_count, struct domain** participating, int not_alone)
 {
   caml_domain_state* domain_state = domain->state;
@@ -686,10 +704,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
         finished_minor_gc = atomic_load_explicit(&domains_finished_minor_gc, memory_order_acquire);
         if ((finished_minor_gc + 1) == participating_count) {
           /* last domain to be done with minor collection, reset global allocation pointer */
-          caml_gc_log("setting caml_global_minor_heap_ptr to caml_minor_heaps_base");
-          atomic_store_explicit(&caml_global_minor_heap_ptr,
-                    caml_global_minor_heap_start,
-                    memory_order_release);
+          caml_adjust_global_minor_heap(participating_count);
         }
 
         /* CAS away finished_minor_gc, only one domain should be the last one. */
@@ -701,10 +716,7 @@ void caml_empty_minor_heap_promote (struct domain* domain, int participating_cou
     }
   }
   else {
-    // Only one domain running, it's safe to just set this directly
-    atomic_store_explicit(&caml_global_minor_heap_ptr,
-			  caml_global_minor_heap_start,
-			  memory_order_release);
+    caml_adjust_global_minor_heap(1);
   }
 
   domain_state->stat_minor_words += Wsize_bsize (minor_allocated_bytes);

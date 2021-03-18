@@ -113,6 +113,7 @@ CAMLexport atomic_uintnat caml_num_domains_running;
 
 CAMLexport uintnat caml_global_minor_heap_start;
 CAMLexport uintnat caml_global_minor_heap_end;
+CAMLexport uintnat caml_global_minor_heap_limit;
 CAMLexport atomic_uintnat caml_global_minor_heap_ptr;
 
 CAMLexport uintnat caml_tls_areas_base;
@@ -183,12 +184,14 @@ int caml_replenish_minor_heap(asize_t minor_heap_wsize)
     cached_global_minor_heap_ptr = atomic_load_explicit(&caml_global_minor_heap_ptr, memory_order_acquire);
 
     CAMLassert(caml_global_minor_heap_start <= cached_global_minor_heap_ptr);
-    CAMLassert(cached_global_minor_heap_ptr <= caml_global_minor_heap_end);
+    CAMLassert(cached_global_minor_heap_ptr <= caml_global_minor_heap_limit);
 
     new_alloc_ptr = cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsize);
 
-    if (new_alloc_ptr > caml_global_minor_heap_end)
+    if (new_alloc_ptr > caml_global_minor_heap_limit) {
+      caml_ev_end("replenish");
       return 0;
+    }
 
     /* CAS away and bump the allocation pointer: if it fails a domain likely
        snatched the requested segment. Restart the loop, else success. */
@@ -197,8 +200,6 @@ int caml_replenish_minor_heap(asize_t minor_heap_wsize)
 				      new_alloc_ptr)) {
       break;
     };
-
-    return 1;
   }
 
   // global_minor_heap_ptr is now our new minor heap for this domain
@@ -217,13 +218,22 @@ int caml_replenish_minor_heap(asize_t minor_heap_wsize)
 
   domain_state->young_ptr = domain_state->young_end;
 
+  caml_gc_log("global minor start: %ld, global minor limit: %ld, global minor end: %ld, global minor ptr: %ld", caml_global_minor_heap_start, caml_global_minor_heap_limit, caml_global_minor_heap_end, caml_global_minor_heap_ptr);
+  caml_gc_log("young start: %ld, young end: %ld, young ptr: %ld", (uintnat)domain_state->young_start, (uintnat)domain_state->young_end, (uintnat)domain_state->young_ptr);
+
 #ifdef DEBUG
   {
     uintnat* p = (uintnat*)domain_state->young_start;
-    for (; p < (uintnat*)(domain_state->young_end + Bsize_wsize(minor_heap_wsize)); p++)
+    for (; p < (uintnat*)(domain_state->young_end); p++)
       *p = Debug_uninit_align;
   }
 #endif
+
+  CAMLassert(domain_state->young_start < (char*)caml_global_minor_heap_limit && domain_state->young_start >= (char*)caml_global_minor_heap_start);
+  CAMLassert(domain_state->young_end <= (char*)caml_global_minor_heap_limit && domain_state->young_end > (char*)caml_global_minor_heap_start);
+
+  CAMLassert((domain_state->young_limit < caml_global_minor_heap_limit && domain_state->young_limit >= caml_global_minor_heap_start)
+              || domain_state->young_limit == INTERRUPT_MAGIC);
 
   caml_ev_end("replenish");
   return 0;
@@ -268,6 +278,8 @@ static void create_domain(uintnat initial_minor_heap_wsize) {
     caml_plat_unlock(&s->lock);
   }
   if (d) {
+    uintnat young_limit;
+
     d->state.internals = d;
     domain_self = d;
     SET_Caml_state((void*)(d->tls_area));
@@ -304,7 +316,12 @@ static void create_domain(uintnat initial_minor_heap_wsize) {
        to trigger minor_heaps reallocation on GC poll */
     domain_state->young_start = (char*)caml_global_minor_heap_start;
     domain_state->young_end = (char*)caml_global_minor_heap_start;
-    domain_state->young_limit = (uintnat) caml_global_minor_heap_start;
+
+    young_limit = atomic_load_acq((atomic_uintnat*)&domain_state->young_limit);
+    if( young_limit != INTERRUPT_MAGIC ) {
+      atomic_compare_exchange_strong((atomic_uintnat*)&domain_state->young_limit, &young_limit, (atomic_uintnat)caml_global_minor_heap_start);
+    }
+
     domain_state->young_ptr = (char *) caml_global_minor_heap_start;
 
     domain_state->dls_root = caml_create_root_noexc(Val_unit);
@@ -379,12 +396,20 @@ void caml_init_domains(uintnat minor_heap_wsz) {
   tls_size = caml_mem_round_up_pages(sizeof(caml_domain_state));
   tls_areas_size = tls_size * Max_domains;
 
-  heaps_base = caml_mem_map(size, size, 0 /* commit */);
+  heaps_base = caml_mem_map(size, size, 1 /* reserve_only */);
+
   tls_base = caml_mem_map(tls_areas_size, tls_areas_size, 1 /* reserve_only */);
   if (!heaps_base || !tls_base) caml_raise_out_of_memory();
 
+  // We should commit some space for at least one domain though
+  if( !caml_mem_commit(heaps_base, Bsize_wsize(minor_heap_wsz)) ) {
+    caml_raise_out_of_memory();
+  }
+
   caml_global_minor_heap_start = (uintnat) heaps_base;
   caml_global_minor_heap_end = (uintnat) heaps_base + size;
+  // Our initial limit is just for one domain
+  caml_global_minor_heap_limit = (uintnat) heaps_base + Bsize_wsize(minor_heap_wsz);
   caml_global_minor_heap_ptr = (uintnat) heaps_base;
   caml_tls_areas_base = (uintnat) tls_base;
 
@@ -410,7 +435,6 @@ void caml_init_domains(uintnat minor_heap_wsz) {
     dom->tls_area = domain_tls_base;
     dom->tls_area_end = domain_tls_base + tls_size;
   }
-
 
   create_domain(minor_heap_wsz);
   if (!domain_self) caml_fatal_error("Failed to create main domain");
@@ -934,21 +958,26 @@ static void caml_poll_gc_work()
 
   // Check if our minor heap is full. If it is then we need to try to grab a
   // new one from the global minor heap.
-  /*if( minor_heap_full && !need_minor_gc ) {
+  if( domain_minor_heap_full && !need_minor_gc ) {
     uintnat global_ptr =
       atomic_load_explicit(&caml_global_minor_heap_ptr, memory_order_acquire);
 
-    // Check if there's space left in the global minor heap
-    if( global_ptr < caml_global_minor_heap_end ) {
+    // Check if there's space left in the global minor heap. If not we need to
+    // do a minor collection.
+    if( global_ptr >= caml_global_minor_heap_limit ) {
+      need_minor_gc = 1;
+    }
+    else
+    {
       // There is space, let's try to get a new minor heap
       if(!caml_replenish_minor_heap(caml_params->init_minor_heap_wsz)) {
           // Failed to replenish our minor heap
           need_minor_gc = 1;
       }
     }
-  }*/
+  }
 
-  if ( domain_minor_heap_full || need_minor_gc ) {
+  if ( need_minor_gc ) {
     /* out of minor heap or collection forced */
     caml_ev_begin("dispatch_minor_gc");
     Caml_state->requested_minor_gc = 0;
