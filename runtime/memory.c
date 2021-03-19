@@ -358,7 +358,7 @@ static inline value alloc_shr(mlsize_t wosize, tag_t tag, int noexc)
       return (value)NULL;
   }
   dom_st->allocated_words += Whsize_wosize(wosize);
-  if (dom_st->allocated_words > dom_st->minor_heap_wsz) {
+  if (dom_st->allocated_words > global_minor_heap_wsz_per_domain) {
     caml_request_major_slice();
   }
 

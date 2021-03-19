@@ -53,7 +53,7 @@ struct caml_minor_tables {
 
 struct domain;
 
-CAMLextern asize_t minor_heap_wsz;
+CAMLextern asize_t global_minor_heap_wsz_per_domain;
 
 extern void caml_set_minor_heap_size (asize_t); /* size in bytes */
 extern void caml_empty_minor_heap_no_major_slice_from_stw (struct domain* domain, void* unused, int participating_count, struct domain** participating); /* in STW */

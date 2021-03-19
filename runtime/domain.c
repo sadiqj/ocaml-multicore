@@ -176,6 +176,9 @@ int caml_replenish_minor_heap()
   uintnat new_alloc_ptr;
   uintnat young_limit;
 
+  uintnat minor_buffer_wsize = global_minor_heap_wsz_per_domain >> 3;
+  uintnat minor_buffer_bsize = Bsize_wsize(minor_buffer_wsize);
+
   caml_ev_begin("replenish");
 
   // Here we try to replenish our minor heap from the global minor heap
@@ -186,7 +189,7 @@ int caml_replenish_minor_heap()
     CAMLassert(caml_global_minor_heap_start <= cached_global_minor_heap_ptr);
     CAMLassert(cached_global_minor_heap_ptr <= caml_global_minor_heap_limit);
 
-    new_alloc_ptr = cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsz);
+    new_alloc_ptr = cached_global_minor_heap_ptr + minor_buffer_bsize;
 
     if (new_alloc_ptr > caml_global_minor_heap_limit) {
       caml_ev_end("replenish");
@@ -204,7 +207,7 @@ int caml_replenish_minor_heap()
 
   // global_minor_heap_ptr is now our new minor heap for this domain
 
-  domain_state->minor_heap_wsz = caml_norm_minor_heap_size(minor_heap_wsz);
+  domain_state->minor_heap_wsz = minor_buffer_wsize;
 
   young_limit = atomic_load_acq((atomic_uintnat*)&domain_state->young_limit);
   if( young_limit != INTERRUPT_MAGIC ) {
@@ -212,7 +215,7 @@ int caml_replenish_minor_heap()
   }
 
   domain_state->young_start = (char*)cached_global_minor_heap_ptr;
-  domain_state->young_end = (char*)(cached_global_minor_heap_ptr + Bsize_wsize(minor_heap_wsz));
+  domain_state->young_end = (char*)(cached_global_minor_heap_ptr + minor_buffer_bsize);
 
   domain_state->young_ptr = domain_state->young_end;
 
@@ -238,7 +241,7 @@ int caml_replenish_minor_heap()
 }
 
 /* must be run on the domain's thread */
-static void create_domain(uintnat initial_minor_heap_wsize) {
+static void create_domain() {
   int i;
   dom_internal* d = 0;
   Assert (domain_self == 0);
@@ -399,17 +402,17 @@ void caml_init_domains(uintnat init_minor_heap_wsz) {
   tls_base = caml_mem_map(tls_areas_size, tls_areas_size, 1 /* reserve_only */);
   if (!heaps_base || !tls_base) caml_raise_out_of_memory();
 
-  minor_heap_wsz = init_minor_heap_wsz;
+  global_minor_heap_wsz_per_domain = init_minor_heap_wsz;
 
   // We should commit some space for at least one domain though
-  if( !caml_mem_commit(heaps_base, Bsize_wsize(minor_heap_wsz)) ) {
+  if( !caml_mem_commit(heaps_base, Bsize_wsize(global_minor_heap_wsz_per_domain)) ) {
     caml_raise_out_of_memory();
   }
 
   caml_global_minor_heap_start = (uintnat) heaps_base;
   caml_global_minor_heap_end = (uintnat) heaps_base + size;
   // Our initial limit is just for one domain
-  caml_global_minor_heap_limit = (uintnat) heaps_base + Bsize_wsize(minor_heap_wsz);
+  caml_global_minor_heap_limit = (uintnat) heaps_base + Bsize_wsize(global_minor_heap_wsz_per_domain);
   caml_global_minor_heap_ptr = (uintnat) heaps_base;
   caml_tls_areas_base = (uintnat) tls_base;
 
@@ -436,7 +439,8 @@ void caml_init_domains(uintnat init_minor_heap_wsz) {
     dom->tls_area_end = domain_tls_base + tls_size;
   }
 
-  create_domain(minor_heap_wsz);
+  create_domain();
+
   if (!domain_self) caml_fatal_error("Failed to create main domain");
 
   caml_init_signal_handling();
@@ -565,7 +569,7 @@ static void* domain_thread_func(void* v)
   struct domain_startup_params* p = v;
   caml_root callback = p->callback;
 
-  create_domain(caml_params->init_minor_heap_wsz);
+  create_domain();
   p->newdom = domain_self;
 
   caml_plat_lock(&p->parent->lock);

@@ -124,7 +124,7 @@ CAMLprim value caml_gc_get(value v)
   CAMLlocal1 (res);
 
   res = caml_alloc_tuple (11);
-  Store_field (res, 0, Val_long (Caml_state->minor_heap_wsz));  /* s */
+  Store_field (res, 0, Val_long (global_minor_heap_wsz_per_domain));  /* s */
   Store_field (res, 2, Val_long (caml_percent_free));           /* o */
   Store_field (res, 3, Val_long (caml_params->verb_gc));        /* v */
 #ifndef NATIVE_CODE
@@ -182,7 +182,7 @@ CAMLprim value caml_gc_set(value v)
   /* Minor heap size comes last because it will trigger a minor collection
      (thus invalidating [v]) and it can raise [Out_of_memory]. */
   newminwsz = caml_norm_minor_heap_size (Long_field (v, 0));
-  if (newminwsz != Caml_state->minor_heap_wsz){
+  if (newminwsz != global_minor_heap_wsz_per_domain){
     caml_gc_message (0x20, "New minor heap size: %"
                      ARCH_SIZET_PRINTF_FORMAT "uk words\n", newminwsz / 1024);
     caml_set_minor_heap_size (newminwsz);

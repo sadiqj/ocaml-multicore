@@ -47,7 +47,7 @@ struct generic_table CAML_TABLE_STRUCT(char);
 static atomic_intnat domains_finished_minor_gc;
 static atomic_intnat domain_finished_root;
 
-asize_t minor_heap_wsz;
+asize_t global_minor_heap_wsz_per_domain;
 
 static atomic_uintnat caml_minor_cycles_started = 0;
 
@@ -129,7 +129,7 @@ extern int caml_debug_is_major(value val) {
 
 void caml_set_minor_heap_size (asize_t wsize)
 {
-  minor_heap_wsz = wsize;
+  global_minor_heap_wsz_per_domain = wsize;
 
   caml_domain_state* domain_state = Caml_state;
   struct caml_minor_tables *r = domain_state->minor_tables;
@@ -528,7 +528,7 @@ void caml_adjust_global_minor_heap(int participating_domains) {
   // Calculate the size of the existing mapping
   int global_minor_heap_size = caml_global_minor_heap_limit - caml_global_minor_heap_start;
   // Now using the number of participating domains, we calculate the new size
-  int new_global_minor_heap_size = participating_domains*Bsize_wsize(caml_params->init_minor_heap_wsz) + caml_global_minor_heap_start;
+  int new_global_minor_heap_size = participating_domains*Bsize_wsize(global_minor_heap_wsz_per_domain) + caml_global_minor_heap_start;
 
   if( global_minor_heap_size != new_global_minor_heap_size ) {
     caml_mem_decommit((char*)caml_global_minor_heap_start, global_minor_heap_size);
@@ -885,7 +885,7 @@ static void realloc_generic_table
   CAMLassert (tbl->limit >= tbl->threshold);
 
   if (tbl->base == NULL){
-    alloc_generic_table (tbl, Caml_state->minor_heap_wsz / 8, 256,
+    alloc_generic_table (tbl, global_minor_heap_wsz_per_domain / 8, 256,
                          element_size);
   }else if (tbl->limit == tbl->threshold){
     CAML_INSTR_INT (msg_intr_int, 1);
