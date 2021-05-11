@@ -189,6 +189,7 @@ module I = struct
   let or_ x y = emit (OR (x, y))
   let pop x = emit (POP x)
   let push x = emit (PUSH x)
+  let prefetchnta x = emit (PREFETCHNTA x)
   let ret () = emit RET
   let sal x y = emit (SAL (x, y))
   let sar x y = emit (SAR (x, y))

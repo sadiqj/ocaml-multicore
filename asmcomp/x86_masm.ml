@@ -196,6 +196,7 @@ let print_instr b = function
   | OR (arg1, arg2) -> i2 b "or" arg1 arg2
   | POP arg -> i1 b "pop" arg
   | PUSH arg -> i1 b "push" arg
+  | PREFETCHNTA arg -> i1 b "prefetchnta" arg
   | RET -> i0 b "ret"
   | ROUNDSD (r, arg1, arg2) -> i2 b (string_of_rounding r) arg1 arg2
   | SAL (arg1, arg2) -> i2 b "sal" arg1 arg2

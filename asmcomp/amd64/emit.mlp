@@ -650,6 +650,7 @@ let emit_instr fallthrough i =
         let lbl_after_alloc = new_label() in
         def_label lbl_after_alloc;
         I.lea (mem64 NONE 8 R15) (res i 0);
+        I.prefetchnta (mem64 NONE 176 R15);
         call_gc_sites :=
           { gc_lbl = lbl_call_gc;
             gc_return_lbl = lbl_after_alloc;
