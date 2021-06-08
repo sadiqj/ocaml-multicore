@@ -36,12 +36,10 @@
 #include "caml/startup_aux.h"
 #include "caml/weak.h"
 
-/*
-  FIXME: This is far too small. A better policy would be to match
-  OCaml's: allow the mark stack to grow to major_heap / 32. However,
-  leaving it small for now means the overflow code gets more testing.
-*/
-#define MARK_STACK_SIZE (1 << 14)
+/* NB the MARK_STACK_INIT_SIZE must be larger than the number of objects
+   that can be in a pool, see POOL_WSIZE */
+#define MARK_STACK_INIT_SIZE (1 << 12)
+#define INITIAL_POOLS_TO_RESCAN_LEN 4
 
 typedef struct {
   value block;
@@ -52,6 +50,7 @@ typedef struct {
 struct mark_stack {
   mark_entry* stack;
   uintnat count;
+  uintnat size;
 };
 
 uintnat caml_percent_free = Percent_free_def;
@@ -65,6 +64,8 @@ static atomic_uintnat num_domains_to_mark;
 static atomic_uintnat num_domains_to_ephe_sweep;
 static atomic_uintnat num_domains_to_final_update_first;
 static atomic_uintnat num_domains_to_final_update_last;
+
+static atomic_uintnat terminated_domains_allocated_words;
 
 gc_phase_t caml_gc_phase;
 
@@ -175,6 +176,10 @@ static int no_orphaned_work ()
     orph_structs.ephe_list_todo == 0 &&
     orph_structs.ephe_list_live == 0 &&
     orph_structs.final_info == NULL;
+}
+
+void caml_orphan_allocated_words() {
+    atomic_fetch_add(&terminated_domains_allocated_words, Caml_state->allocated_words);
 }
 
 void caml_add_orphaned_ephe(value todo_head, value todo_tail,
@@ -296,7 +301,7 @@ double caml_mean_space_overhead ()
 
 static uintnat default_slice_budget() {
   double p, heap_words;
-  intnat computed_work;
+  intnat computed_work, opportunistic_credit;
   /*
      Free memory at the start of the GC cycle (garbage + free list) (assumed):
                  FM = heap_words * caml_percent_free
@@ -319,9 +324,9 @@ static uintnat default_slice_budget() {
      Amount of marking work for the GC cycle:
                  MW = heap_words * 100 / (100 + caml_percent_free)
      Amount of sweeping work for the GC cycle:
-                 SW = heap_blocks
+                 SW = heap_sweep_words
      Amount of total work for the GC cycle:
-                 TW = MW + SW = heap_words * 100 / (100 + caml_percent_free) + heap_blocks
+                 TW = MW + SW = heap_words * 100 / (100 + caml_percent_free) + heap_sweep_words
 
      Amount of time to spend on this slice:
                  T = P * TT
@@ -332,11 +337,35 @@ static uintnat default_slice_budget() {
   */
   uintnat heap_size = caml_heap_size(Caml_state->shared_heap);
   heap_words = (double)Wsize_bsize(heap_size);
-  uintnat heap_blocks = caml_heap_blocks(Caml_state->shared_heap);
-  p = (double) Caml_state->allocated_words * 3.0 * (100 + caml_percent_free)
+  uintnat heap_sweep_words = heap_words;
+
+  uintnat saved_terminated_words = terminated_domains_allocated_words;
+  if( saved_terminated_words > 0 ) {
+    while(!atomic_compare_exchange_strong(&terminated_domains_allocated_words, &saved_terminated_words, 0));
+  }
+
+  p = (double) (saved_terminated_words + Caml_state->allocated_words) * 3.0 * (100 + caml_percent_free)
       / heap_words / caml_percent_free / 2.0;
 
-  computed_work = (intnat) (p * (heap_blocks + (heap_words * 100 / (100 + caml_percent_free))));
+  if (p > 0.3) p = 0.3;
+
+  computed_work = (intnat) (p * (heap_sweep_words + (heap_words * 100 / (100 + caml_percent_free))));
+
+  /* adjust computed work for opportunistic_work done by this domain already */
+  if ( Caml_state->opportunistic_work > computed_work ) {
+    /* bound the credit that opportunistic_work can have vs computed_work */
+    if (Caml_state->opportunistic_work > 2*computed_work) {
+     Caml_state->opportunistic_work = 2*computed_work;
+    }
+
+    opportunistic_credit = computed_work;
+    Caml_state->opportunistic_work -= computed_work;
+    computed_work = 0;
+  } else {
+    opportunistic_credit = Caml_state->opportunistic_work;
+    Caml_state->opportunistic_work = 0;
+    computed_work -= opportunistic_credit;
+  }
 
   caml_gc_message (0x40, "heap_words = %"
                          ARCH_INTNAT_PRINTF_FORMAT "u\n",
@@ -348,6 +377,7 @@ static uintnat default_slice_budget() {
                          ARCH_INTNAT_PRINTF_FORMAT "uu\n",
                    (uintnat) (p * 1000000));
   caml_gc_message (0x40, "ordered work = %ld words\n", (intnat)-1);
+  caml_gc_message (0x40, "opportunistic work credit = %ld words\n", opportunistic_credit);
   caml_gc_message (0x40, "computed work = %ld words\n", computed_work);
 
   return computed_work;
@@ -452,14 +482,45 @@ static struct pool* find_pool_to_rescan();
 #define Is_markable(v) (Is_block(v) && !Is_minor(v))
 #endif
 
+static void realloc_mark_stack (struct mark_stack* stk)
+{
+  mark_entry* new;
+  uintnat mark_stack_bsize = stk->size * sizeof(mark_entry);
+
+  if ( mark_stack_bsize < caml_heap_size(Caml_state->shared_heap) / 32) {
+    caml_gc_log ("Growing mark stack to %"ARCH_INTNAT_PRINTF_FORMAT"uk bytes\n",
+                 (intnat) mark_stack_bsize * 2 / 1024);
+
+    new = (mark_entry*) caml_stat_resize_noexc ((char*) stk->stack,
+                                                2 * mark_stack_bsize);
+    if (new != NULL) {
+      stk->stack = new;
+      stk->size *= 2;
+      return;
+    }
+    caml_gc_log ("No room for growing mark stack. Pruning..\n");
+  }
+  caml_gc_log ("Mark stack size is %"ARCH_INTNAT_PRINTF_FORMAT"u"
+               "bytes (> 32 * major heap size of this domain %"
+               ARCH_INTNAT_PRINTF_FORMAT"u bytes. Pruning..\n",
+               mark_stack_bsize,
+               caml_heap_size(Caml_state->shared_heap));
+  mark_stack_prune(stk);
+}
+
 static void mark_stack_push(struct mark_stack* stk, mark_entry e)
 {
   value v;
+  int i;
+
   CAMLassert(Is_block(e.block) && !Is_young(e.block));
   CAMLassert(Tag_val(e.block) != Infix_tag);
   CAMLassert(Tag_val(e.block) != Cont_tag);
   CAMLassert(Tag_val(e.block) < No_scan_tag);
-  while (1) {
+
+  /* Optimisation to avoid pushing small, unmarkable objects such as [Some 42]
+   * into the mark stack. */
+  for (i = 0; i < 16; i++) {
     if (e.offset == e.end)
       /* nothing left to mark */
       return;
@@ -471,8 +532,14 @@ static void mark_stack_push(struct mark_stack* stk, mark_entry e)
       /* keep going */
       e.offset++;
   }
-  if (stk->count >= MARK_STACK_SIZE)
-    mark_stack_prune(stk);
+
+  if (e.offset == e.end)
+    /* nothing left to mark */
+    return;
+
+  if (stk->count == stk->size)
+    realloc_mark_stack(stk);
+
   stk->stack[stk->count++] = e;
 }
 
@@ -497,6 +564,7 @@ static intnat do_some_marking(struct mark_stack* stk, intnat budget) {
       mark_stack_push(stk, e);
       break;
     }
+    budget--;
     CAMLassert(Is_markable(e.block) &&
                Has_status_hd(Hd_val(e.block), global.MARKED) &&
                Tag_val(e.block) < No_scan_tag &&
@@ -514,10 +582,11 @@ static intnat do_some_marking(struct mark_stack* stk, intnat budget) {
         if (Tag_hd(hd) == Cont_tag) {
           mark_stack_push(stk, e);
           caml_darken_cont(v);
-	  e = (mark_entry){0};
-	} else {
+          e = (mark_entry){0};
+          budget -= Whsize_hd(hd);
+        } else {
 again:
-          if (Tag_hd(hd) == Lazy_tag) {
+          if (Tag_hd(hd) == Lazy_tag || Tag_hd(hd) == Forcing_tag) {
             if (!atomic_compare_exchange_strong(
                   Hp_atomic_val(v), &hd,
                   With_status_hd(hd, global.MARKED))) {
@@ -538,7 +607,6 @@ again:
           }
         }
       }
-      budget -= Whsize_hd(hd);
     }
   }
   return budget;
@@ -736,6 +804,17 @@ void caml_accum_heap_stats(struct heap_stats* acc, const struct heap_stats* h)
   acc->large_blocks += h->large_blocks;
 }
 
+void caml_remove_heap_stats(struct heap_stats* acc, const struct heap_stats* h)
+{
+  acc->pool_words -= h->pool_words;
+  acc->pool_live_words -= h->pool_live_words;
+  acc->pool_live_blocks -= h->pool_live_blocks;
+  acc->pool_frag_words -= h->pool_frag_words;
+  acc->large_words -= h->large_words;
+  acc->large_blocks -= h->large_blocks;
+}
+
+
 void caml_sample_gc_stats(struct gc_stats* buf)
 {
   memset(buf, 0, sizeof(*buf));
@@ -745,13 +824,25 @@ void caml_sample_gc_stats(struct gc_stats* buf)
   int phase = ! (caml_major_cycles_completed & 1);
   int i;
   intnat pool_max = 0, large_max = 0;
+  struct domain* domain_self = caml_domain_self ();
+  int my_id = domain_self->state->id;
+
   for (i=0; i<Max_domains; i++) {
     struct gc_stats* s = &sampled_gc_stats[phase][i];
     struct heap_stats* h = &s->major_heap;
-    buf->minor_words += s->minor_words;
-    buf->promoted_words += s->promoted_words;
-    buf->major_words += s->major_words;
-    buf->minor_collections += s->minor_collections;
+    if (i != my_id) {
+      buf->minor_words += s->minor_words;
+      buf->promoted_words += s->promoted_words;
+      buf->major_words += s->major_words;
+      buf->minor_collections += s->minor_collections;
+    }
+    else {
+      buf->minor_words += Caml_state->stat_minor_words;
+      buf->promoted_words += Caml_state->stat_promoted_words;
+      buf->major_words += Caml_state->stat_major_words;
+      buf->minor_collections += Caml_state->stat_minor_collections;
+      //FIXME handle the case for major heap stats [h]
+    }
     /* The instantaneous maximum heap size cannot be computed
        from per-domain statistics, and would be very expensive
        to maintain directly. Here, we just sum the per-domain
@@ -769,6 +860,8 @@ void caml_sample_gc_stats(struct gc_stats* buf)
 static void cycle_all_domains_callback(struct domain* domain, void* unused)
 {
   uintnat num_domains_in_stw;
+
+  caml_ev_begin("major_gc/cycle_domains");
 
   CAMLassert(domain == caml_domain_self());
   CAMLassert(atomic_load_acq(&ephe_cycle_info.num_domains_todo) ==
@@ -887,6 +980,8 @@ static void cycle_all_domains_callback(struct domain* domain, void* unused)
   /* Mark roots for new cycle */
   domain->state->marking_done = 0;
 
+  domain->state->opportunistic_work = 0;
+
   caml_ev_begin("major_gc/roots");
   caml_do_roots (&caml_darken, NULL, domain, 0);
   caml_ev_end("major_gc/roots");
@@ -911,6 +1006,7 @@ static void cycle_all_domains_callback(struct domain* domain, void* unused)
   domain->state->final_info->updated_last = 0;
 
   caml_ev_end("major_gc/stw");
+  caml_ev_end("major_gc/cycle_domains");
 }
 
 static int is_complete_phase_sweep_and_mark_main (struct domain *d)
@@ -956,6 +1052,7 @@ static int is_complete_phase_sweep_ephe (struct domain *d)
 
 static void try_complete_gc_phase (struct domain* domain, void* unused)
 {
+  caml_ev_begin("major_gc/phase_change");
   barrier_status b;
 
   b = caml_global_barrier_begin ();
@@ -967,12 +1064,15 @@ static void try_complete_gc_phase (struct domain* domain, void* unused)
     }
   }
   caml_global_barrier_end(b);
+  domain->state->opportunistic_work = 0;
+  caml_ev_end("major_gc/phase_change");
 }
 
 #define Chunk_size 0x4000
 
 static intnat major_collection_slice(intnat howmuch,
                                      intnat from_barrier,
+                                     intnat opportunistic,
                                      intnat* budget_left /* out */)
 {
   struct domain* d = caml_domain_self();
@@ -986,11 +1086,20 @@ static intnat major_collection_slice(intnat howmuch,
   int was_marking = 0;
   uintnat saved_ephe_cycle;
   uintnat saved_major_cycle;
+  int log_events = !opportunistic || (caml_params->verb_gc & 0x40);
 
-  caml_ev_begin("major_gc/slice");
+  /* shortcut out if there is no opportunistic work to be done
+   * NB: needed particularly to avoid caml_ev spam when polling */
+  if (opportunistic && domain_state->sweeping_done && domain_state->marking_done)
+  {
+    if (budget_left) *budget_left = budget;
+    return computed_work;
+  }
+
+  if (log_events) caml_ev_begin("major_gc/slice");
 
   if (!domain_state->sweeping_done) {
-    caml_ev_begin("major_gc/sweep");
+    if (log_events) caml_ev_begin("major_gc/sweep");
 
     sweep_work = budget;
     do {
@@ -1010,7 +1119,7 @@ static intnat major_collection_slice(intnat howmuch,
       atomic_fetch_add_verify_ge0(&num_domains_to_sweep, -1);
     }
 
-    caml_ev_end("major_gc/sweep");
+    if (log_events) caml_ev_end("major_gc/sweep");
     sweep_work -= budget;
 
     /*
@@ -1026,7 +1135,7 @@ mark_again:
   while (budget > 0) {
     if (!domain_state->marking_done) {
       if (!was_marking) {
-        caml_ev_begin("major_gc/mark");
+        if (log_events) caml_ev_begin("major_gc/mark");
         was_marking = 1;
       }
       available = budget > Chunk_size ? Chunk_size : budget;
@@ -1040,77 +1149,79 @@ mark_again:
       */
     } else if (0) {
       if (was_marking) {
-        caml_ev_end("major_gc/mark");
+        if (log_events) caml_ev_end("major_gc/mark");
         was_marking = 0;
       }
-      caml_ev_begin("major_gc/steal");
+      if (log_events) caml_ev_begin("major_gc/steal");
       steal_result = steal_mark_work();
-      caml_ev_end("major_gc/steal");
+      if (log_events) caml_ev_end("major_gc/steal");
       if (steal_result == -1) break;
     } else {
       break;
     }
   }
-  if (was_marking)
-    caml_ev_end("major_gc/mark");
+  if (was_marking) {
+    if (log_events) caml_ev_end("major_gc/mark");
+    was_marking = 0;
+  }
   mark_work -= budget;
 
-  /* Finalisers */
-  if (caml_gc_phase == Phase_mark_final &&
-      caml_final_update_first(d)) {
-    /* This domain has updated finalise first values */
-    atomic_fetch_add_verify_ge0(&num_domains_to_final_update_first, -1);
-    if (budget > 0 && !domain_state->marking_done)
-      goto mark_again;
-  }
+  if (!opportunistic) {
+    /* Finalisers */
+    if (caml_gc_phase == Phase_mark_final &&
+        caml_final_update_first(d)) {
+      /* This domain has updated finalise first values */
+      atomic_fetch_add_verify_ge0(&num_domains_to_final_update_first, -1);
+      if (budget > 0 && !domain_state->marking_done)
+        goto mark_again;
+    }
 
-  if (caml_gc_phase == Phase_sweep_ephe &&
-      caml_final_update_last(d)) {
-    /* This domain has updated finalise last values */
-    atomic_fetch_add_verify_ge0(&num_domains_to_final_update_last, -1);
-    /* Nothing has been marked while updating last */
-  }
+    if (caml_gc_phase == Phase_sweep_ephe &&
+        caml_final_update_last(d)) {
+      /* This domain has updated finalise last values */
+      atomic_fetch_add_verify_ge0(&num_domains_to_final_update_last, -1);
+      /* Nothing has been marked while updating last */
+    }
 
-  caml_adopt_orphaned_work();
+    caml_adopt_orphaned_work();
 
-  /* Ephemerons */
-  saved_ephe_cycle = atomic_load_acq(&ephe_cycle_info.ephe_cycle);
-  if (domain_state->ephe_info->todo != (value) NULL &&
-      saved_ephe_cycle > domain_state->ephe_info->cycle) {
-    caml_ev_begin("major_gc/ephe_mark");
-    budget = ephe_mark(budget, saved_ephe_cycle);
-    caml_ev_end("major_gc/ephe_mark");
-    if (domain_state->ephe_info->todo == (value) NULL)
-      caml_ephe_todo_list_emptied ();
-    else if (budget > 0 && domain_state->marking_done)
-      record_ephe_marking_done(saved_ephe_cycle);
-    else if (budget > 0) goto mark_again;
-  }
+    /* Ephemerons */
+    saved_ephe_cycle = atomic_load_acq(&ephe_cycle_info.ephe_cycle);
+    if (domain_state->ephe_info->todo != (value) NULL &&
+        saved_ephe_cycle > domain_state->ephe_info->cycle) {
+      caml_ev_begin("major_gc/ephe_mark");
+      budget = ephe_mark(budget, saved_ephe_cycle);
+      caml_ev_end("major_gc/ephe_mark");
+      if (domain_state->ephe_info->todo == (value) NULL)
+        caml_ephe_todo_list_emptied ();
+      else if (budget > 0 && domain_state->marking_done)
+        record_ephe_marking_done(saved_ephe_cycle);
+      else if (budget > 0) goto mark_again;
+    }
 
-  if (caml_gc_phase == Phase_sweep_ephe &&
-      domain_state->ephe_info->todo != 0) {
-    caml_ev_begin("major_gc/ephe_sweep");
-    budget = ephe_sweep (d, budget);
-    caml_ev_end("major_gc/ephe_sweep");
-    if (domain_state->ephe_info->todo == 0) {
-      atomic_fetch_add_verify_ge0(&num_domains_to_ephe_sweep, -1);
+    if (caml_gc_phase == Phase_sweep_ephe &&
+        domain_state->ephe_info->todo != 0) {
+      caml_ev_begin("major_gc/ephe_sweep");
+      budget = ephe_sweep (d, budget);
+      caml_ev_end("major_gc/ephe_sweep");
+      if (domain_state->ephe_info->todo == 0) {
+        atomic_fetch_add_verify_ge0(&num_domains_to_ephe_sweep, -1);
+      }
+    }
+
+    /* Complete GC phase */
+    if (is_complete_phase_sweep_and_mark_main(d) ||
+        is_complete_phase_mark_final (d)) {
+      if (from_barrier) {
+        try_complete_gc_phase (d, (void*)0);
+      } else {
+        caml_try_run_on_all_domains (&try_complete_gc_phase, 0);
+      }
+      if (budget > 0) goto mark_again;
     }
   }
 
-  /* Complete GC phase */
-  if (is_complete_phase_sweep_and_mark_main(d) ||
-      is_complete_phase_mark_final (d)) {
-    caml_ev_begin("major_gc/phase_change");
-    if (from_barrier) {
-      try_complete_gc_phase (d, (void*)0);
-    } else {
-      caml_try_run_on_all_domains (&try_complete_gc_phase, 0);
-    }
-    caml_ev_end("major_gc/phase_change");
-    if (budget > 0) goto mark_again;
-  }
-
-  caml_ev_end("major_gc/slice");
+  if (log_events) caml_ev_end("major_gc/slice");
 
   if (budget_left)
     *budget_left = budget;
@@ -1121,20 +1232,25 @@ mark_again:
               (unsigned long)(domain_state->stat_blocks_marked - blocks_marked_before));
   domain_state->stat_major_words += domain_state->allocated_words;
   domain_state->allocated_words = 0;
+  if (opportunistic) {
+    domain_state->opportunistic_work += computed_work - budget;
+  } else {
+    if (budget < 0)
+      domain_state->opportunistic_work += -budget;
+  }
 
-  if (is_complete_phase_sweep_ephe(d)) {
+
+  if (!opportunistic && is_complete_phase_sweep_ephe(d)) {
     saved_major_cycle = caml_major_cycles_completed;
     /* To handle the case where multiple domains try to finish the major
       cycle simultaneously, we loop until the current cycle has ended,
       ignoring whether caml_try_run_on_all_domains succeeds. */
     while (saved_major_cycle == caml_major_cycles_completed) {
-      caml_ev_begin("major_gc/phase_change");
       if (from_barrier) {
         cycle_all_domains_callback(d, (void*)0);
       } else {
         caml_try_run_on_all_domains(&cycle_all_domains_callback, 0);
       }
-      caml_ev_end("major_gc/phase_change");
     }
   }
 
@@ -1142,9 +1258,14 @@ mark_again:
 }
 
 
+intnat caml_opportunistic_major_collection_slice(intnat howmuch, intnat* budget_left /* out */)
+{
+  return major_collection_slice(howmuch, 0, 1, budget_left);
+}
+
 intnat caml_major_collection_slice(intnat howmuch, intnat* budget_left /* out */)
 {
-  return major_collection_slice(howmuch, 0, budget_left);
+  return major_collection_slice(howmuch, 0, 0, budget_left);
 }
 
 static void finish_major_cycle_callback (struct domain* domain, void* arg)
@@ -1153,7 +1274,7 @@ static void finish_major_cycle_callback (struct domain* domain, void* arg)
   CAMLassert (domain == caml_domain_self());
   caml_empty_minor_heap();
   while (saved_major_cycles == caml_major_cycles_completed) {
-    major_collection_slice(10000000, 1, 0);
+    major_collection_slice(10000000, 1, 0, 0);
   }
 }
 
@@ -1164,8 +1285,10 @@ void caml_finish_major_cycle ()
 }
 
 void caml_empty_mark_stack () {
-  while (!Caml_state->marking_done)
-    mark(10000000);
+  while (!Caml_state->marking_done){
+    mark(1000);
+    caml_handle_incoming_interrupts();
+  }
 
   if (Caml_state->stat_blocks_marked)
     caml_gc_log("Finished marking major heap. Marked %u blocks",
@@ -1184,31 +1307,32 @@ void caml_finish_marking () {
 }
 
 void caml_finish_sweeping () {
-  if (!Caml_state->sweeping_done) {
-    caml_ev_begin("major_gc/finish_sweeping");
-    while (caml_sweep(Caml_state->shared_heap, 10) <= 0);
-    Caml_state->sweeping_done = 1;
-    atomic_fetch_add_verify_ge0(&num_domains_to_sweep, -1);
-    caml_ev_end("major_gc/finish_sweeping");
+  if (Caml_state->sweeping_done) return;
+  caml_ev_begin("major_gc/finish_sweeping");
+  while (!Caml_state->sweeping_done) {
+    if (caml_sweep(Caml_state->shared_heap, 10) > 0) {
+      /* just finished sweeping */
+      CAMLassert(Caml_state->sweeping_done == 0);
+      Caml_state->sweeping_done = 1;
+      atomic_fetch_add_verify_ge0(&num_domains_to_sweep, -1);
+      break;
+    }
+    caml_handle_incoming_interrupts();
   }
+  caml_ev_end("major_gc/finish_sweeping");
 }
-
-static struct pool** pools_to_rescan;
-static int pools_to_rescan_count;
-static int pools_to_rescan_len;
-static caml_plat_mutex pools_to_rescan_lock = CAML_PLAT_MUTEX_INITIALIZER;
 
 static struct pool* find_pool_to_rescan()
 {
   struct pool* p;
-  caml_plat_lock(&pools_to_rescan_lock);
-  if (pools_to_rescan_count > 0) {
-    p = pools_to_rescan[--pools_to_rescan_count];
-    caml_gc_log("Redarkening pool %p (%d others left)", p, pools_to_rescan_count);
+
+  if (Caml_state->pools_to_rescan_count > 0) {
+    p = Caml_state->pools_to_rescan[--Caml_state->pools_to_rescan_count];
+    caml_gc_log("Redarkening pool %p (%d others left)", p, Caml_state->pools_to_rescan_count);
   } else {
     p = 0;
   }
-  caml_plat_unlock(&pools_to_rescan_lock);
+
   return p;
 }
 
@@ -1338,23 +1462,15 @@ static void mark_stack_prune (struct mark_stack* stk)
               (int)stk->count);
 
 
-  /* Add the pools to rescan to the global list.
-
-     This must be done after the mark stack is filtered, since other
-     threads race to remove pools from the global list. As soon as
-     pools_to_rescan_lock is released, we cannot rely on pools being
-     in the global list. */
-
-  caml_plat_lock(&pools_to_rescan_lock);
-  for (i = start; i < count; i++) {
-    if (pools_to_rescan_count == pools_to_rescan_len) {
-      pools_to_rescan_len = pools_to_rescan_len * 2 + 128;
-      pools_to_rescan =
-        caml_stat_resize(pools_to_rescan, pools_to_rescan_len * sizeof(struct pool*));
+  /* Add the pools to rescan to domain's pools to rescan list */
+    for (i = start; i < count; i++) {
+      if (Caml_state->pools_to_rescan_count == Caml_state->pools_to_rescan_len) {
+        Caml_state->pools_to_rescan_len = Caml_state->pools_to_rescan_len * 2 + 128;
+        Caml_state->pools_to_rescan =
+          caml_stat_resize(Caml_state->pools_to_rescan, Caml_state->pools_to_rescan_len * sizeof(struct pool*));
+      }
+      Caml_state->pools_to_rescan[Caml_state->pools_to_rescan_count++] = pools[i].pool;
     }
-    pools_to_rescan[pools_to_rescan_count++] = pools[i].pool;
-  }
-  caml_plat_unlock(&pools_to_rescan_lock);
 }
 
 int caml_init_major_gc(caml_domain_state* d) {
@@ -1362,17 +1478,20 @@ int caml_init_major_gc(caml_domain_state* d) {
   if(Caml_state->mark_stack == NULL) {
     return -1;
   }
-  Caml_state->mark_stack->stack = caml_stat_alloc_noexc(MARK_STACK_SIZE * sizeof(mark_entry));
+  Caml_state->mark_stack->stack =
+    caml_stat_alloc_noexc(MARK_STACK_INIT_SIZE * sizeof(mark_entry));
   if(Caml_state->mark_stack->stack == NULL) {
     caml_stat_free(Caml_state->mark_stack);
     Caml_state->mark_stack = NULL;
     return -1;
   }
   Caml_state->mark_stack->count = 0;
+  Caml_state->mark_stack->size = MARK_STACK_INIT_SIZE;
   /* Fresh domains do not need to performing marking or sweeping. */
   d->sweeping_done = 1;
   d->marking_done = 1;
   d->stealing = 0;
+  d->opportunistic_work = 0;
   /* Finalisers. Fresh domains participate in updating finalisers. */
   d->final_info = caml_alloc_final_info ();
   if(d->final_info == NULL) {
@@ -1391,6 +1510,11 @@ int caml_init_major_gc(caml_domain_state* d) {
   }
   atomic_fetch_add(&num_domains_to_final_update_first, 1);
   atomic_fetch_add(&num_domains_to_final_update_last, 1);
+
+  Caml_state->pools_to_rescan = caml_stat_alloc_noexc(INITIAL_POOLS_TO_RESCAN_LEN * sizeof(struct pool*));
+  Caml_state->pools_to_rescan_len = INITIAL_POOLS_TO_RESCAN_LEN;
+  Caml_state->pools_to_rescan_count = 0;
+
   return 0;
 }
 
@@ -1398,6 +1522,7 @@ void caml_teardown_major_gc() {
   CAMLassert(Caml_state->mark_stack->count == 0);
   caml_stat_free(Caml_state->mark_stack->stack);
   caml_stat_free(Caml_state->mark_stack);
+  if( Caml_state->pools_to_rescan_len > 0 ) caml_stat_free(Caml_state->pools_to_rescan);
   Caml_state->mark_stack = NULL;
 }
 

@@ -161,7 +161,7 @@ void caml_ephe_clean (struct domain* d, value v) {
     if (release_data) {
       Op_val(v)[CAML_EPHE_DATA_OFFSET] = caml_ephe_none;
     } else {
-      CAMLassert (!Is_block(child) && !is_unmarked(child));
+      CAMLassert (!Is_block(child) || !is_unmarked(child));
     }
   }
 }
@@ -356,8 +356,8 @@ static value ephe_blit_field_produce_domain (value es, value ofs, value len,
   CAMLassert (Ephe_domain(es) == d);
 
   for (i = 0; i < length; i++) {
-    Op_val(es)[offset_s + i] = caml_promote(d, Op_val(es)[offset_s + i]);
     caml_darken(0, Op_val(es)[offset_s + i], 0);
+    Op_val(es)[offset_s + i] = caml_promote(d, Op_val(es)[offset_s + i]);
   }
   ar = caml_alloc_shr (length, 0);
   for (i = 0; i < length; i++) {
@@ -691,6 +691,8 @@ static value ephe_blit_field (value es, mlsize_t offset_s,
   struct domain *d1, *d2;
   long i;
 
+  if (length == 0) CAMLreturn(Val_unit);
+
   while (1) {
     d1 = Ephe_domain(es);
     d2 = Ephe_domain(ed);
@@ -701,10 +703,12 @@ static value ephe_blit_field (value es, mlsize_t offset_s,
     if (my_domain == d1 && my_domain == d2) {
       if (offset_d < offset_s) {
         for (i = 0; i < length; i++) {
+          caml_darken(0, Op_val(es)[offset_s + i], 0);
           do_set(my_domain, ed, offset_d + i, Op_val(es)[offset_s + i]);
         }
       } else {
         for (i = length - 1; i >= 0; i--) {
+          caml_darken(0, Op_val(es)[offset_s + i], 0);
           do_set(my_domain, ed, offset_d + i, Op_val(es)[offset_s + i]);
         }
       }

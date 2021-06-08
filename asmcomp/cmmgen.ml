@@ -1992,6 +1992,8 @@ and transl_prim_1 env p arg dbg =
   | Pint_as_pointer ->
      Cop(Caddi, [transl env arg; Cconst_int (-1)], dbg)
      (* always a pointer outside the heap *)
+  | Ppoll ->
+      Cop(Cpoll, [transl env arg], dbg)
   (* Exceptions *)
   | Praise _ when not (!Clflags.debug) ->
       Cop(Craise (Lambda.Raise_notrace), [transl env arg], dbg)
@@ -2405,10 +2407,10 @@ and transl_prim_2 env p arg1 arg2 dbg =
                      [transl_unbox_int dbg env bi arg1;
                       transl_unbox_int dbg env bi arg2], dbg)) dbg
   | Patomic_exchange ->
-     Cop (Cextcall ("caml_atomic_exchange", typ_val, true, None),
+     Cop (Cextcall ("caml_atomic_exchange", typ_val, false, None),
           [transl env arg1; transl env arg2], dbg)
   | Patomic_fetch_add ->
-     Cop (Cextcall ("caml_atomic_fetch_add", typ_int, true, None),
+     Cop (Cextcall ("caml_atomic_fetch_add", typ_int, false, None),
           [transl env arg1; transl env arg2], dbg)
   | prim ->
       fatal_errorf "Cmmgen.transl_prim_2: %a" Printlambda.primitive prim
@@ -2584,7 +2586,7 @@ and transl_prim_3 env p arg1 arg2 arg3 dbg =
                       (unaligned_set_64 ba_data idx newval dbg))))))
 
   | Patomic_cas ->
-     Cop (Cextcall ("caml_atomic_cas", typ_int, true, None),
+     Cop (Cextcall ("caml_atomic_cas", typ_int, false, None),
           [transl env arg1; transl env arg2; transl env arg3], dbg)
 
   | prim ->

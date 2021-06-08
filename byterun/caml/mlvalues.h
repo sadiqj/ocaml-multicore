@@ -217,6 +217,9 @@ bits  63        (64-P) (63-P)        10 9     8 7   0
 #define Is_minor(val) \
   ((((uintnat)(val) ^ (uintnat)Caml_state) & Minor_val_bitmask) == 0)
 
+#define Is_block_and_young(val) Is_young(val)
+#define Is_block_and_minor(val) Is_minor(val)
+
 /* Is_foreign(val) is true iff val is a block in another domain's minor heap.
    Since all minor heaps lie in one aligned block, this can be tested via
    more bitmasking. */
@@ -277,12 +280,16 @@ static inline void* Ptr_val(value val)
 #define Val_bytecode(code) (Val_pc(code))
 #define Code_val(val) Bytecode_val(Field_imm((val), 0))
 
-/* This tag is used (with Forward_tag) to implement lazy values.
+/* This tag is used (with Forcing_tag & Forward_tag) to implement lazy values.
    See major_gc.c and stdlib/lazy.ml. */
 #define Lazy_tag 246
 
 /* Tag used for continuations (see fiber.c) */
 #define Cont_tag 245
+
+/* This tag is used (with Lazy_tag & Forward_tag) to implement lazy values.
+ * See major_gc.c and stdlib/lazy.ml. */
+#define Forcing_tag 244
 
 /* Another special case: variants */
 CAMLextern value caml_hash_variant(char const * tag);
@@ -431,7 +438,7 @@ static inline value Field_imm(value x, int i) {
   return v;
 }
 
-CAMLextern value caml_read_barrier(value, int);
+CAMLextern value caml_read_barrier(value, intnat);
 static inline value Field(value x, int i) {
   Assert (Hd_val(x));
   value v = (((value*)x))[i];
@@ -439,7 +446,7 @@ static inline value Field(value x, int i) {
   return Is_foreign(v) ? caml_read_barrier(x, i) : v;
 }
 
-static inline void caml_read_field(value x, int i, value* ret) {
+static inline void caml_read_field(value x, intnat i, value* ret) {
   Assert (Hd_val(x));
   /* See Note [MM] in memory.c */
   value v = atomic_load_explicit(&Op_atomic_val(x)[i], memory_order_relaxed);

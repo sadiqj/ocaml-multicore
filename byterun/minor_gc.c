@@ -425,6 +425,7 @@ CAMLexport value caml_promote(struct domain* domain, value root)
   if (!Is_minor(root))
     return root;
 
+  caml_ev_begin("minor_gc/promote");
   st.oldest_promoted = (value)domain_state->young_start;
   st.promote_domain = domain;
 
@@ -501,7 +502,9 @@ CAMLexport value caml_promote(struct domain* domain, value root)
       }
     }
   }
-  domain_state->stat_promoted_words += domain_state->allocated_words - prev_alloc_words;
+  domain_state->stat_promoted_words +=
+    domain_state->allocated_words - prev_alloc_words;
+  caml_ev_end("minor_gc/promote");
   return root;
 }
 
@@ -582,9 +585,9 @@ void caml_empty_minor_heap_domain (struct domain* domain)
     }
     caml_ev_end("minor_gc/roots");
 
-    caml_ev_begin("minor_gc/promote");
+    caml_ev_begin("minor_gc/oldify_mopup");
     oldify_mopup (&st);
-    caml_ev_end("minor_gc/promote");
+    caml_ev_end("minor_gc/oldify_mopup");
 
     caml_ev_begin("minor_gc/ephemerons");
     for (re = minor_tables->ephe_ref.base;
@@ -710,9 +713,12 @@ CAMLexport void caml_minor_collection (void)
 
 CAMLexport value caml_check_urgent_gc (value extra_root)
 {
-  CAMLparam1 (extra_root);
-  caml_handle_gc_interrupt();
-  CAMLreturn (extra_root);
+  if (Caml_check_gc_interrupt(Caml_state)) {
+    CAMLparam1(extra_root);
+    caml_handle_gc_interrupt();
+    CAMLdrop;
+  }
+  return extra_root;
 }
 
 static void realloc_generic_table

@@ -201,7 +201,6 @@ static void create_domain(uintnat initial_minor_heap_wsize) {
     caml_plat_unlock(&s->lock);
   }
   if (d) {
-
     d->state.internals = d;
     domain_self = d;
     SET_Caml_state((void*)(d->tls_area));
@@ -634,9 +633,11 @@ void caml_handle_gc_interrupt() {
   if (((uintnat)Caml_state->young_ptr - Bhsize_wosize(Max_young_wosize) <
        domain_self->minor_heap_area) ||
       Caml_state->force_major_slice) {
+    caml_ev_begin("dispatch");
     /* out of minor heap or collection forced */
     Caml_state->force_major_slice = 0;
     caml_minor_collection();
+    caml_ev_end("dispatch");
   }
 }
 
@@ -881,6 +882,7 @@ static void domain_terminate()
   caml_ev_pause(EV_PAUSE_YIELD);
   s->terminating = 1;
   while (!finished) {
+    caml_orphan_allocated_words();
     caml_finish_sweeping();
     caml_empty_minor_heap();
     caml_finish_marking();
@@ -907,7 +909,6 @@ static void domain_terminate()
       finished = 1;
       s->terminating = 0;
       s->running = 0;
-      atomic_fetch_add(&num_domains_running, -1);
       s->unique_id += Max_domains;
     }
     caml_plat_unlock(&s->lock);
@@ -927,12 +928,20 @@ static void domain_terminate()
     caml_free_stack(domain_state->current_stack);
   }
 
+  if(domain_state->current_stack != NULL) {
+    caml_free_stack(domain_state->current_stack);
+  }
+
   if (Caml_state->critical_section_nesting) {
     Caml_state->critical_section_nesting = 0;
     acknowledge_all_pending_interrupts();
   }
   caml_plat_unlock(&domain_self->roots_lock);
   caml_plat_assert_all_locks_unlocked();
+  /* This is the last thing we do because we need to be able to rely
+     on caml_domain_alone (which uses num_domains_running) in at least
+     the shared_heap lockfree fast paths */
+  atomic_fetch_add(&num_domains_running, -1);
 }
 
 void caml_handle_incoming_interrupts()
@@ -1012,7 +1021,7 @@ CAMLprim value caml_ml_domain_critical_section(value delta)
   return Val_unit;
 }
 
-#define Chunk_size 0x10000
+#define Chunk_size 0x400
 
 CAMLprim value caml_ml_domain_yield(value unused)
 {
@@ -1032,7 +1041,7 @@ CAMLprim value caml_ml_domain_yield(value unused)
       caml_plat_wait(&s->cond);
     } else {
       caml_plat_unlock(&s->lock);
-      caml_major_collection_slice(Chunk_size, &left);
+      caml_opportunistic_major_collection_slice(Chunk_size, &left);
       if (left == Chunk_size)
         found_work = 0;
       caml_plat_lock(&s->lock);
@@ -1109,7 +1118,7 @@ CAMLprim value caml_ml_domain_yield_until(value t)
       }
     } else {
       caml_plat_unlock(&s->lock);
-      caml_major_collection_slice(Chunk_size, &left);
+      caml_opportunistic_major_collection_slice(Chunk_size, &left);
       if (left == Chunk_size)
         found_work = 0;
       caml_plat_lock(&s->lock);

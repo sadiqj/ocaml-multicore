@@ -112,6 +112,7 @@ let compile_fundecl (ppf : formatter) fd_cmm =
   ++ Profile.record ~accumulate:true "cse" CSE.fundecl
   ++ pass_dump_if ppf dump_cse "After CSE"
   ++ Profile.record ~accumulate:true "liveness" (liveness ppf)
+  ++ Profile.record ~accumulate:true "polling" Polling.fundecl
   ++ Profile.record ~accumulate:true "deadcode" Deadcode.fundecl
   ++ pass_dump_if ppf dump_live "Liveness analysis"
   ++ Profile.record ~accumulate:true "spill" Spill.fundecl
